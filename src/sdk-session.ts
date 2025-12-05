@@ -191,6 +191,7 @@ const AIC_COMMANDS = [
   { value: '/gemini', name: `${rainbowText('/gemini', 1)}        Switch to Gemini CLI`, description: 'Switch to Gemini CLI' },
   { value: '/i', name: `${rainbowText('/i', 2)}             Enter interactive mode`, description: 'Enter interactive mode (Ctrl+] to detach)' },
   { value: '/forward', name: `${rainbowText('/forward', 3)}       Forward last response`, description: 'Forward response: /forward [tool] [msg]' },
+  { value: '/fwd', name: `${rainbowText('/fwd', 4)}            Forward (alias)`, description: 'Forward response: /fwd [tool] [msg]' },
   { value: '/history', name: `${rainbowText('/history', 4)}       Show conversation`, description: 'Show conversation history' },
   { value: '/status', name: `${rainbowText('/status', 5)}        Show running processes`, description: 'Show daemon status' },
   { value: '/default', name: `${rainbowText('/default', 0)}       Set default tool`, description: 'Set default tool: /default <claude|gemini>' },
@@ -403,7 +404,7 @@ export class SDKSession {
     console.log('');
     
     // Tips section
-    console.log(`  ${colors.dim}💡 ${colors.brightYellow}//command${colors.dim} opens interactive mode & sends the command. ${colors.white}Use ${colors.brightYellow}Ctrl+]${colors.white} to return to aic²${colors.reset}`);
+    console.log(`  ${colors.dim}💡 ${colors.brightYellow}//command${colors.dim} opens interactive mode & sends the command. ${colors.white}Use ${colors.brightYellow}Ctrl+]${colors.white} or ${colors.brightYellow}Esc Esc${colors.white} to return to aic²${colors.reset}`);
     console.log(`  ${colors.dim}💡 ${colors.brightYellow}Tab${colors.dim}: autocomplete   ${colors.brightYellow}↑/↓${colors.dim}: history${colors.reset}`);
     console.log('');
     
@@ -429,7 +430,7 @@ export class SDKSession {
    * Tab completion for / commands
    */
   private completer(line: string): CompleterResult {
-    const commands = ['/claude', '/gemini', '/i', '/forward', '/history', '/status', '/default', '/help', '/clear', '/quit', '/cya'];
+    const commands = ['/claude', '/gemini', '/i', '/forward', '/fwd', '/history', '/status', '/default', '/help', '/clear', '/quit', '/cya'];
     
     // Only complete if line starts with /
     if (line.startsWith('/')) {
@@ -501,8 +502,16 @@ export class SDKSession {
 
       // Handle AIC meta commands (single slash)
       if (trimmed.startsWith('/')) {
-        // Animate the command with rainbow effect
-        await animateRainbow(trimmed, 400);
+        // Split command from arguments
+        const spaceIndex = trimmed.indexOf(' ');
+        const command = spaceIndex > 0 ? trimmed.slice(0, spaceIndex) : trimmed;
+        const args = spaceIndex > 0 ? trimmed.slice(spaceIndex) : '';
+        
+        // Animate only the command with rainbow, show args in yellow
+        await animateRainbow(command, 400);
+        if (args) {
+          process.stdout.write(`${colors.brightYellow}${args}${colors.reset}`);
+        }
         process.stdout.write('\n');
         await this.handleMetaCommand(trimmed.slice(1));
         continue;
@@ -550,6 +559,7 @@ export class SDKSession {
         break;
 
       case 'forward':
+      case 'fwd':
         await this.handleForward(parts.slice(1).join(' '));
         break;
 
@@ -629,6 +639,7 @@ export class SDKSession {
     console.log(`  ${colors.dim}•${colors.reset} ${colors.brightYellow}Tab${colors.reset}            Autocomplete commands`);
     console.log(`  ${colors.dim}•${colors.reset} ${colors.brightYellow}↑/↓${colors.reset}            Navigate history`);
     console.log(`  ${colors.dim}•${colors.reset} ${colors.brightYellow}Ctrl+]${colors.reset}         Detach from interactive mode`);
+    console.log(`  ${colors.dim}•${colors.reset} ${colors.brightYellow}Esc Esc${colors.reset}        Detach (alternative, press Escape twice quickly)`);
     console.log('');
   }
 
@@ -859,41 +870,62 @@ export class SDKSession {
         this.interactiveOutputBuffer.set(this.activeTool, current + data);
       });
 
-      // Set up stdin forwarding with Ctrl+] detection
+      // Set up stdin forwarding with Ctrl+] detection (or double-Escape as fallback)
       if (process.stdin.isTTY) {
         process.stdin.setRawMode(true);
       }
       process.stdin.resume();
 
       let detached = false;
+      let lastEscapeTime = 0;
+
+      const performDetach = () => {
+        if (detached) return;
+        detached = true;
+        cleanup();
+        
+        // Save captured output to conversation history for forwarding
+        const capturedOutput = this.interactiveOutputBuffer.get(this.activeTool);
+        if (capturedOutput) {
+          const cleanedOutput = stripAnsi(capturedOutput).trim();
+          if (cleanedOutput.length > 50) { // Only save meaningful output
+            this.conversationHistory.push({
+              tool: this.activeTool,
+              role: 'assistant',
+              content: cleanedOutput,
+            });
+          }
+          // Clear buffer after saving
+          this.interactiveOutputBuffer.set(this.activeTool, '');
+        }
+        
+        console.log(`\n\n${colors.yellow}⏸${colors.reset} Detached from ${toolColor}${toolName}${colors.reset} ${colors.dim}(still running)${colors.reset}`);
+        console.log(`${colors.dim}Use ${colors.brightYellow}/i${colors.dim} to re-attach • ${colors.brightGreen}/forward${colors.dim} to send to other tool${colors.reset}\n`);
+        resolve();
+      };
 
       const onStdinData = (data: Buffer) => {
         const str = data.toString();
         
-        // Check for Ctrl+] (detach key)
-        if (str === DETACH_KEY) {
-          detached = true;
-          cleanup();
-          
-          // Save captured output to conversation history for forwarding
-          const capturedOutput = this.interactiveOutputBuffer.get(this.activeTool);
-          if (capturedOutput) {
-            const cleanedOutput = stripAnsi(capturedOutput).trim();
-            if (cleanedOutput.length > 50) { // Only save meaningful output
-              this.conversationHistory.push({
-                tool: this.activeTool,
-                role: 'assistant',
-                content: cleanedOutput,
-              });
-            }
-            // Clear buffer after saving
-            this.interactiveOutputBuffer.set(this.activeTool, '');
-          }
-          
-          console.log(`\n\n${colors.yellow}⏸${colors.reset} Detached from ${toolColor}${toolName}${colors.reset} ${colors.dim}(still running)${colors.reset}`);
-          console.log(`${colors.dim}Use ${colors.brightYellow}/i${colors.dim} to re-attach • ${colors.brightGreen}/forward${colors.dim} to send to other tool${colors.reset}\n`);
-          resolve();
+        // Check for Ctrl+] (detach key) - check if included anywhere in buffer
+        if (str.includes(DETACH_KEY)) {
+          performDetach();
           return;
+        }
+        
+        // Alternative: Double-Escape within 500ms to detach
+        // This helps when Ctrl+] doesn't work (e.g., Gemini CLI)
+        if (str === '\x1b') { // Single Escape key
+          const now = Date.now();
+          if (now - lastEscapeTime < 500) {
+            // Double escape detected - detach!
+            performDetach();
+            return;
+          }
+          lastEscapeTime = now;
+        } else {
+          // Reset escape timer if any other key pressed
+          lastEscapeTime = 0;
         }
         
         // Forward to PTY
@@ -1025,41 +1057,62 @@ export class SDKSession {
         }
       }, sendDelay);
 
-      // Set up stdin forwarding with Ctrl+] detection
+      // Set up stdin forwarding with Ctrl+] detection (or double-Escape as fallback)
       if (process.stdin.isTTY) {
         process.stdin.setRawMode(true);
       }
       process.stdin.resume();
 
       let detached = false;
+      let lastEscapeTime = 0;
+
+      const performDetach = () => {
+        if (detached) return;
+        detached = true;
+        cleanup();
+        
+        // Save captured output to conversation history for forwarding
+        const capturedOutput = this.interactiveOutputBuffer.get(this.activeTool);
+        if (capturedOutput) {
+          const cleanedOutput = stripAnsi(capturedOutput).trim();
+          if (cleanedOutput.length > 50) { // Only save meaningful output
+            this.conversationHistory.push({
+              tool: this.activeTool,
+              role: 'assistant',
+              content: cleanedOutput,
+            });
+          }
+          // Clear buffer after saving
+          this.interactiveOutputBuffer.set(this.activeTool, '');
+        }
+        
+        console.log(`\n\n${colors.yellow}⏸${colors.reset} Detached from ${toolColor}${toolName}${colors.reset} ${colors.dim}(still running)${colors.reset}`);
+        console.log(`${colors.dim}Use ${colors.brightYellow}/i${colors.dim} to re-attach • ${colors.brightGreen}/forward${colors.dim} to send to other tool${colors.reset}\n`);
+        resolve();
+      };
 
       const onStdinData = (data: Buffer) => {
         const str = data.toString();
         
-        // Check for Ctrl+] (detach key)
-        if (str === DETACH_KEY) {
-          detached = true;
-          cleanup();
-          
-          // Save captured output to conversation history for forwarding
-          const capturedOutput = this.interactiveOutputBuffer.get(this.activeTool);
-          if (capturedOutput) {
-            const cleanedOutput = stripAnsi(capturedOutput).trim();
-            if (cleanedOutput.length > 50) { // Only save meaningful output
-              this.conversationHistory.push({
-                tool: this.activeTool,
-                role: 'assistant',
-                content: cleanedOutput,
-              });
-            }
-            // Clear buffer after saving
-            this.interactiveOutputBuffer.set(this.activeTool, '');
-          }
-          
-          console.log(`\n\n${colors.yellow}⏸${colors.reset} Detached from ${toolColor}${toolName}${colors.reset} ${colors.dim}(still running)${colors.reset}`);
-          console.log(`${colors.dim}Use ${colors.brightYellow}/i${colors.dim} to re-attach • ${colors.brightGreen}/forward${colors.dim} to send to other tool${colors.reset}\n`);
-          resolve();
+        // Check for Ctrl+] (detach key) - check if included anywhere in buffer
+        if (str.includes(DETACH_KEY)) {
+          performDetach();
           return;
+        }
+        
+        // Alternative: Double-Escape within 500ms to detach
+        // This helps when Ctrl+] doesn't work (e.g., Gemini CLI)
+        if (str === '\x1b') { // Single Escape key
+          const now = Date.now();
+          if (now - lastEscapeTime < 500) {
+            // Double escape detected - detach!
+            performDetach();
+            return;
+          }
+          lastEscapeTime = now;
+        } else {
+          // Reset escape timer if any other key pressed
+          lastEscapeTime = 0;
         }
         
         // Forward to PTY

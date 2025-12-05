@@ -760,7 +760,7 @@ export class SDKSession {
 
       proc.on('close', (code) => {
         spinner.stop();
-        
+
         if (code !== 0) {
           reject(new Error(`Claude exited with code ${code}: ${stderr || stdout}`));
         } else {
@@ -769,7 +769,7 @@ export class SDKSession {
           const rendered = marked.parse(stdout.trim()) as string;
           process.stdout.write(rendered);
           console.log('');
-          
+
           this.claudeHasSession = true;
           resolve(stripAnsi(stdout).trim());
         }
@@ -818,7 +818,7 @@ export class SDKSession {
 
       proc.on('close', (code) => {
         spinner.stop();
-        
+
         if (code !== 0) {
           reject(new Error(`Gemini exited with code ${code}: ${stderr || stdout}`));
         } else {
@@ -827,7 +827,7 @@ export class SDKSession {
           const rendered = marked.parse(stdout.trim()) as string;
           process.stdout.write(rendered);
           console.log('');
-          
+
           this.geminiHasSession = true;
           resolve(stripAnsi(stdout).trim());
         }
@@ -1105,35 +1105,19 @@ export class SDKSession {
         process.stdout.write('\x1b[?2004l'); // Disable bracketed paste
         process.stdout.write('\x1b[>0u');    // Reset keyboard enhancement to legacy mode (CSI u)
         process.stdout.write('\x1b[?25h');   // Ensure cursor is visible
-        
+
         if (process.stdin.isTTY) {
           process.stdin.setRawMode(false);
         }
-        
-        // MUTE readline temporarily to hide garbage echo
-        const originalOutput = (this.rl as any)?.output;
-        if (this.rl) {
-          // @ts-ignore - modifying internal property for mute effect
-          (this.rl as any).output = new Writable({
-            write: (chunk, encoding, cb) => { cb(); }
-          });
-        }
-        
-        // Resume readline to consume the garbage (which is now muted)
-        this.rl?.resume();
 
-        // Unmute after 500ms - let pending terminal responses drain
+        // Recreate readline to ensure clean state after PTY interaction
+        this.rl?.close();
+        this.setupReadline();
+
+        // Clear any garbage after a brief delay
         setTimeout(() => {
-          if (this.rl && originalOutput) {
-            // @ts-ignore
-            (this.rl as any).output = originalOutput;
-            // Clear any garbage that accumulated in the readline buffer
-            (this.rl as any).line = '';
-            (this.rl as any).cursor = 0;
-            // Clear the line and repaint clean prompt
-            process.stdout.write('\x1b[2K\r');
-          }
-        }, 500);
+          process.stdout.write('\x1b[2K\r');
+        }, 100);
       };
     });
   }
@@ -1437,35 +1421,19 @@ export class SDKSession {
           }
           this.interactiveOutputBuffer.set(this.activeTool, '');
         }
-        
+
         if (process.stdin.isTTY) {
           process.stdin.setRawMode(false);
         }
-        
-        // MUTE readline temporarily to hide garbage echo
-        const originalOutput = (this.rl as any)?.output;
-        if (this.rl) {
-          // @ts-ignore - modifying internal property for mute effect
-          (this.rl as any).output = new Writable({
-            write: (chunk, encoding, cb) => { cb(); }
-          });
-        }
-        
-        // Resume readline immediately - safest approach
-        this.rl?.resume();
 
-        // Unmute after 500ms - let pending terminal responses drain
+        // Recreate readline to ensure clean state after PTY interaction
+        this.rl?.close();
+        this.setupReadline();
+
+        // Clear any garbage after a brief delay
         setTimeout(() => {
-          if (this.rl && originalOutput) {
-            // @ts-ignore
-            (this.rl as any).output = originalOutput;
-            // Clear any garbage that accumulated in the readline buffer
-            (this.rl as any).line = '';
-            (this.rl as any).cursor = 0;
-            // Clear the line and repaint clean prompt
-            process.stdout.write('\x1b[2K\r');
-          }
-        }, 500);
+          process.stdout.write('\x1b[2K\r');
+        }, 100);
       };
     });
   }

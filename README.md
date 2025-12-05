@@ -222,7 +222,7 @@ AIC² is modular. To add a new AI CLI (e.g., OpenAI Codex):
 3. Register in `src/adapters/index.ts` and `src/index.ts`
 4. Add to `src/sdk-session.ts`
 
-See [ADDINGAI_CLIs.md](ADDINGAI_CLIs.md) for detailed instructions.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed instructions.
 
 ## Features
 

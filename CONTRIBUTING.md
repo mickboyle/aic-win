@@ -138,26 +138,6 @@ case 'codex':
   break;
 ```
 
-### Step 3b: Add to Interactive Session (optional)
-
-If you also want the tool in daemon mode, edit `src/interactive.ts`:
-
-Add to `TOOL_CONFIGS` array:
-```typescript
-const TOOL_CONFIGS: ToolConfig[] = [
-  // ... existing tools ...
-  {
-    daemon: {
-      name: 'codex',
-      displayName: 'OpenAI Codex',
-      command: 'codex',
-      args: [],
-      responseTimeout: 3000,
-    },
-  },
-];
-```
-
 ### Step 4: Build and Test
 
 ```bash

@@ -1,42 +1,59 @@
 {
-  "name": "aic",
+  "name": "ai-code-connect",
   "version": "1.0.0",
   "description": "AI Code Connect - Bridge Claude Code and Gemini CLI",
   "main": "dist/index.js",
   "bin": {
     "aic": "./dist/index.js"
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build"
   },
   "keywords": [
     "cli",
     "ai",
     "claude",
     "gemini",
-    "bridge"
+    "claude-code",
+    "gemini-cli",
+    "bridge",
+    "assistant"
   ],
-  "author": "",
+  "author": "Jacob Ben-Davi",
   "license": "MIT",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jacob-bd/ai-code-connect.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jacob-bd/ai-code-connect/issues"
+  },
+  "homepage": "https://github.com/jacob-bd/ai-code-connect#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "dependencies": {
-    "@anthropic-ai/claude-code": "^2.0.58",
     "@inquirer/prompts": "^8.0.2",
-    "@types/node": "^24.10.1",
     "commander": "^14.0.2",
     "inquirer": "^13.0.2",
     "marked": "^15.0.12",
     "marked-terminal": "^7.3.0",
-    "node-pty": "^1.0.0",
-    "tsx": "^4.21.0",
-    "typescript": "^5.9.3"
+    "node-pty": "^1.0.0"
   },
   "devDependencies": {
     "@types/marked-terminal": "^6.1.1",
+    "@types/node": "^24.10.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
     "vitest": "^4.0.15"
   }
 }

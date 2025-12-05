@@ -1,5 +1,6 @@
 import { spawn, ChildProcess, execSync } from 'child_process';
 import { createInterface, Interface, CompleterResult } from 'readline';
+import { Writable } from 'stream';
 import * as pty from 'node-pty';
 import { IPty } from 'node-pty';
 import { marked } from 'marked';
@@ -505,9 +506,9 @@ export class SDKSession {
   private async promptLoop(): Promise<void> {
     while (this.isRunning) {
       const input = await this.readInput();
-      
+
       if (!input || !input.trim()) continue;
-      
+
       const trimmed = input.trim();
 
       // Add to history (readline handles this, but we track for persistence)
@@ -961,11 +962,12 @@ export class SDKSession {
           // Clear buffer after saving
           this.interactiveOutputBuffer.set(this.activeTool, '');
         }
-        
+
         // Clear any pending terminal responses before showing detach message
         process.stdout.write('\x1b[2K\r'); // Clear current line
         console.log(`\n\n${colors.yellow}⏸${colors.reset} Detached from ${toolColor}${toolName}${colors.reset} ${colors.dim}(still running)${colors.reset}`);
-        console.log(`${colors.dim}Use ${colors.brightYellow}/i${colors.dim} to re-attach • ${colors.brightGreen}/forward${colors.dim} to send to other tool${colors.reset}\n`);
+        console.log(`${colors.dim}Use ${colors.brightYellow}/i${colors.dim} to re-attach • ${colors.brightGreen}/forward${colors.dim} to send to other tool${colors.reset}`);
+        console.log(`${colors.dim}Press ${colors.brightYellow}Enter${colors.dim} to continue${colors.reset}\n`);
         resolve();
       };
 
@@ -1086,7 +1088,11 @@ export class SDKSession {
       ptyProcess.onExit(exitHandler);
 
       // Cleanup function
+      let cleanedUp = false;
       const cleanup = () => {
+        if (cleanedUp) return;
+        cleanedUp = true;
+
         process.stdin.removeListener('data', onStdinData);
         process.stdout.removeListener('resize', onResize);
         outputDisposable.dispose();
@@ -1097,17 +1103,37 @@ export class SDKSession {
         // CRITICAL FIX: Explicitly disable terminal features that cause garbage
         process.stdout.write('\x1b[?1004l'); // Disable focus reporting (stops ^[[I / ^[[O)
         process.stdout.write('\x1b[?2004l'); // Disable bracketed paste
+        process.stdout.write('\x1b[>0u');    // Reset keyboard enhancement to legacy mode (CSI u)
+        process.stdout.write('\x1b[?25h');   // Ensure cursor is visible
         
         if (process.stdin.isTTY) {
           process.stdin.setRawMode(false);
         }
         
-        // Resume readline immediately
-        this.rl?.resume();
+        // MUTE readline temporarily to hide garbage echo
+        const originalOutput = (this.rl as any)?.output;
+        if (this.rl) {
+          // @ts-ignore - modifying internal property for mute effect
+          (this.rl as any).output = new Writable({
+            write: (chunk, encoding, cb) => { cb(); }
+          });
+        }
         
-        console.log(`\n\n${colors.yellow}⏸${colors.reset} Detached from ${toolColor}${toolName}${colors.reset} ${colors.dim}(still running)${colors.reset}`);
-        console.log(`${colors.dim}Use ${colors.brightYellow}/i${colors.dim} to re-attach • ${colors.brightGreen}/forward${colors.dim} to send to other tool${colors.reset}\n`);
-        resolve();
+        // Resume readline to consume the garbage (which is now muted)
+        this.rl?.resume();
+
+        // Unmute after 500ms - let pending terminal responses drain
+        setTimeout(() => {
+          if (this.rl && originalOutput) {
+            // @ts-ignore
+            (this.rl as any).output = originalOutput;
+            // Clear any garbage that accumulated in the readline buffer
+            (this.rl as any).line = '';
+            (this.rl as any).cursor = 0;
+            // Clear the line and repaint clean prompt
+            process.stdout.write('\x1b[2K\r');
+          }
+        }, 500);
       };
     });
   }
@@ -1256,17 +1282,18 @@ export class SDKSession {
           // Clear buffer after saving
           this.interactiveOutputBuffer.set(this.activeTool, '');
         }
-        
+
         // Clear any pending terminal responses before showing detach message
         process.stdout.write('\x1b[2K\r'); // Clear current line
         console.log(`\n\n${colors.yellow}⏸${colors.reset} Detached from ${toolColor}${toolName}${colors.reset} ${colors.dim}(still running)${colors.reset}`);
-        console.log(`${colors.dim}Use ${colors.brightYellow}/i${colors.dim} to re-attach • ${colors.brightGreen}/forward${colors.dim} to send to other tool${colors.reset}\n`);
+        console.log(`${colors.dim}Use ${colors.brightYellow}/i${colors.dim} to re-attach • ${colors.brightGreen}/forward${colors.dim} to send to other tool${colors.reset}`);
+        console.log(`${colors.dim}Press ${colors.brightYellow}Enter${colors.dim} to continue${colors.reset}\n`);
         resolve();
       };
 
       const onStdinData = (data: Buffer) => {
         let str = data.toString();
-        
+
         // Debug output to see what keys are being received
         if (debugKeys) {
           const hexBytes = Array.from(data).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' ');
@@ -1378,7 +1405,11 @@ export class SDKSession {
       ptyProcess.onExit(exitHandler);
 
       // Cleanup function
+      let cleanedUp = false;
       const cleanup = () => {
+        if (cleanedUp) return;
+        cleanedUp = true;
+        
         clearTimeout(fallbackTimer);
         process.stdin.removeListener('data', onStdinData);
         process.stdout.removeListener('resize', onResize);
@@ -1390,6 +1421,8 @@ export class SDKSession {
         // Explicitly disable terminal features that cause garbage
         process.stdout.write('\x1b[?1004l'); // Disable focus reporting
         process.stdout.write('\x1b[?2004l'); // Disable bracketed paste
+        process.stdout.write('\x1b[>0u');    // Reset keyboard enhancement to legacy mode (CSI u)
+        process.stdout.write('\x1b[?25h');   // Ensure cursor is visible
         
         // Save captured output to conversation history
         const capturedOutput = this.interactiveOutputBuffer.get(this.activeTool);
@@ -1409,12 +1442,30 @@ export class SDKSession {
           process.stdin.setRawMode(false);
         }
         
+        // MUTE readline temporarily to hide garbage echo
+        const originalOutput = (this.rl as any)?.output;
+        if (this.rl) {
+          // @ts-ignore - modifying internal property for mute effect
+          (this.rl as any).output = new Writable({
+            write: (chunk, encoding, cb) => { cb(); }
+          });
+        }
+        
         // Resume readline immediately - safest approach
         this.rl?.resume();
-        
-        console.log(`\n\n${colors.yellow}⏸${colors.reset} Detached from ${toolColor}${toolName}${colors.reset} ${colors.dim}(still running)${colors.reset}`);
-        console.log(`${colors.dim}Use ${colors.brightYellow}/i${colors.dim} to re-attach • ${colors.brightGreen}/forward${colors.dim} to send to other tool${colors.reset}\n`);
-        resolve();
+
+        // Unmute after 500ms - let pending terminal responses drain
+        setTimeout(() => {
+          if (this.rl && originalOutput) {
+            // @ts-ignore
+            (this.rl as any).output = originalOutput;
+            // Clear any garbage that accumulated in the readline buffer
+            (this.rl as any).line = '';
+            (this.rl as any).cursor = 0;
+            // Clear the line and repaint clean prompt
+            process.stdout.write('\x1b[2K\r');
+          }
+        }, 500);
       };
     });
   }

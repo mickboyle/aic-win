@@ -1,218 +1,201 @@
-# AI Code Connect (aic)
+# AIC² - AI Code Connect
 
-A lightweight CLI tool that connects Claude Code and Gemini CLI, eliminating the need to manually copy-paste proposals and feedback between AI coding assistants.
+```
+     █████╗ ██╗ ██████╗  ^2
+    ██╔══██╗██║██╔════╝
+    ███████║██║██║     
+    ██╔══██║██║██║     
+    ██║  ██║██║╚██████╗
+    ╚═╝  ╚═╝╚═╝ ╚═════╝
+```
 
-## Problem
+A CLI tool that connects **Claude Code** and **Gemini CLI**, eliminating manual copy-paste between AI coding assistants.
 
-When working with multiple AI coding tools, you often:
-1. Ask Gemini CLI for a proposal
+**AIC²** = **A**I **C**ode **C**onnect (the two C's = ²)
+
+## The Problem
+
+When working with multiple AI coding tools:
+1. Ask Gemini for a proposal
 2. Copy the response
-3. Paste it into Claude Code for review
+3. Paste into Claude for review
 4. Copy Claude's feedback
-5. Paste it back to Gemini
-6. Repeat...
+5. Paste back to Gemini...
 
-This is tedious and error-prone.
+This is tedious and breaks your flow.
 
-## Solution
+## The Solution
 
-`aic` (AI Code Connect) bridges both tools, letting you:
-- Send prompts to either tool with a simple command
-- Forward responses between tools with one command
-- Keep track of the conversation across both tools
-- Run an interactive session that handles everything
+`aic` bridges both tools in a single interactive session with:
+- **Persistent sessions** - Both tools remember context
+- **One-command forwarding** - Send responses between tools instantly
+- **Interactive mode** - Full access to slash commands and approvals
+- **Detach/reattach** - Keep tools running in background
 
 ## Installation
 
 ```bash
-# Clone the repository
+# Clone and install
 cd claude-gemini-cli
-
-# Install dependencies
 npm install
-
-# Build
 npm run build
 
-# Link globally (optional)
+# Link globally
 npm link
 ```
 
 ## Prerequisites
 
-You need both AI CLI tools installed:
+Install both AI CLI tools:
 
-- **Claude Code**: Install via `npm install -g @anthropic-ai/claude-code` or see [Claude Code docs](https://docs.anthropic.com/en/docs/claude-code)
-- **Gemini CLI**: Install via `npm install -g @google/gemini-cli` or see [Gemini CLI docs](https://developers.google.com/gemini-code-assist/docs/gemini-cli)
+- **Claude Code**: `npm install -g @anthropic-ai/claude-code`
+- **Gemini CLI**: `npm install -g @google/gemini-cli`
 
-Verify installation:
+Verify:
 ```bash
 aic tools
-# Should show both tools as "✓ available"
+# Should show both as "✓ available"
 ```
+
+## Quick Start
+
+```bash
+aic
+```
+
+That's it! This launches the interactive session.
 
 ## Usage
 
-### One-shot commands
+### Basic Commands
 
-Send a prompt to a specific tool:
+| Command | Description |
+|---------|-------------|
+| `//claude` | Switch to Claude Code |
+| `//gemini` | Switch to Gemini CLI |
+| `//i` | Enter interactive mode (full tool access) |
+| `//forward` | Forward last response to other tool |
+| `//forward [msg]` | Forward with additional context |
+| `//history` | Show conversation history |
+| `//status` | Show running processes |
+| `//clear` | Clear sessions and history |
+| `//quit` or `//cya` | Exit |
+
+### Command Menu
+
+Type `/` or `//` to see a command menu. Use ↓ arrow to select, or keep typing.
+
+### Example Session
+
+```
+❯ claude → How should I implement caching for this API?
+
+⠹ Claude is thinking...
+I suggest implementing a Redis-based caching layer...
+
+❯ claude → //forward What do you think of this approach?
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+↗ Forwarding from Claude Code → Gemini CLI
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Gemini CLI responds:
+
+The Redis approach is solid. I'd also consider...
+
+❯ gemini → //claude
+● Switched to Claude Code
+
+❯ claude → Can you implement that?
+```
+
+### Interactive Mode
+
+For full tool access (slash commands, approvals, etc.):
 
 ```bash
-# Ask Claude
-aic ask claude "How should I refactor this authentication module?"
+❯ claude → //i
 
-# Ask Gemini
-aic ask gemini "Propose a plan for implementing user sessions"
+▶ Starting Claude Code interactive mode...
+Press Ctrl+] to detach • /exit to terminate
+
+> /cost                    # Claude's slash command
+> /config                  # Another slash command
+> (press Ctrl+])           # Detach back to aic
+
+⏸ Detached from Claude Code (still running)
+Use //i to re-attach
+
+❯ claude → //i             # Re-attach to same session
+↩ Re-attaching to Claude Code...
 ```
 
-### Forward responses between tools
+**Key bindings in interactive mode:**
+- `Ctrl+]` - Detach (tool keeps running)
+- `/exit` - Terminate the tool session
 
-After getting a response, forward it to the other tool for review:
+### Session Persistence
+
+Sessions persist automatically:
+- **Claude**: Uses `--continue` flag
+- **Gemini**: Uses `--resume latest` flag
+
+Your conversation context is maintained across messages.
+
+## CLI Options
 
 ```bash
-# First, ask Gemini for a proposal
-aic ask gemini "How should I structure this React component?"
-
-# Then forward Gemini's response to Claude for review
-aic forward gemini claude
-
-# Optionally add context
-aic forward gemini claude -m "Focus on performance implications"
+aic              # Launch interactive session (default)
+aic tools        # List available AI tools
+aic --version    # Show version
+aic --help       # Show help
 ```
 
-### Interactive session
+## Architecture
 
-For back-and-forth conversations, start an interactive session:
-
-```bash
-aic start
 ```
-
-In the interactive session:
-- `@claude <message>` - Send to Claude Code
-- `@gemini <message>` - Send to Gemini CLI
-- `/forward @<tool> [message]` - Forward last response to another tool
-- `/use <tool>` - Set default tool
-- `/history` - Show conversation history
-- `/clear` - Clear session
-- `/quit` or `/exit` - Exit
-
-Example session:
+src/
+├── adapters/
+│   ├── base.ts           # ToolAdapter interface
+│   ├── claude.ts         # Claude Code adapter
+│   ├── gemini.ts         # Gemini CLI adapter
+│   └── template.ts.example  # Template for new adapters
+├── sdk-session.ts        # Interactive session logic
+├── index.ts              # CLI entry point
+└── utils.ts              # Utilities
 ```
-[claude] > @gemini How should I implement caching for this API?
-Sending to gemini...
-────────────────────────────────────────────────────────────────
-[Gemini CLI]
-────────────────────────────────────────────────────────────────
-I suggest implementing a Redis-based caching layer with...
-────────────────────────────────────────────────────────────────
-
-[claude] > /forward @claude What do you think of this approach?
-Forwarding to claude...
-────────────────────────────────────────────────────────────────
-[Claude Code]
-────────────────────────────────────────────────────────────────
-The Redis approach is solid, but I'd also consider...
-────────────────────────────────────────────────────────────────
-```
-
-### Other commands
-
-```bash
-# Show conversation history
-aic history
-
-# List available tools
-aic tools
-
-# Clear session
-aic clear
-
-# Show help
-aic --help
-```
-
-## Configuration
-
-Configuration is stored in `~/.aic/config.json`:
-
-```json
-{
-  "defaultTool": "claude",
-  "tools": {
-    "claude": {
-      "command": "claude",
-      "defaultFlags": ["-p", "--output-format", "text"]
-    },
-    "gemini": {
-      "command": "gemini",
-      "defaultFlags": ["-o", "text"]
-    }
-  }
-}
-```
-
-## How It Works
-
-1. **Tool Adapters**: Each AI tool has an adapter that knows how to:
-   - Check if the tool is installed
-   - Send prompts in non-interactive mode
-   - Parse and clean the response
-
-2. **Session Manager**: Tracks conversation history across tools and enables forwarding.
-
-3. **Forwarding**: When you forward a response, the bridge:
-   - Takes the last response from the source tool
-   - Wraps it with context (e.g., "Another AI assistant proposed...")
-   - Sends it to the target tool for review
 
 ## Adding New Tools
 
-The architecture is pluggable. To add a new tool (e.g., Codex CLI):
+AIC² is modular. To add a new AI CLI (e.g., OpenAI Codex):
 
-1. Create `src/adapters/codex.ts` implementing the `ToolAdapter` interface
-2. Register it in `src/index.ts`
-3. Rebuild with `npm run build`
+1. Copy the template: `cp src/adapters/template.ts.example src/adapters/codex.ts`
+2. Implement the `ToolAdapter` interface
+3. Register in `src/adapters/index.ts` and `src/index.ts`
+4. Add to `src/sdk-session.ts`
 
-Example adapter:
+See [ADDING_TOOLS.md](ADDING_TOOLS.md) for detailed instructions.
 
-```typescript
-import { ToolAdapter, SendOptions } from './base.js';
-import { runCommand, commandExists, stripAnsi } from '../utils.js';
+## Features
 
-export class CodexAdapter implements ToolAdapter {
-  readonly name = 'codex';
-  readonly displayName = 'Codex CLI';
-  
-  async isAvailable(): Promise<boolean> {
-    return commandExists('codex');
-  }
-  
-  getCommand(prompt: string, options?: SendOptions): string[] {
-    return ['codex', '--non-interactive', prompt];
-  }
-  
-  async send(prompt: string, options?: SendOptions): Promise<string> {
-    const args = this.getCommand(prompt, options).slice(1);
-    const result = await runCommand('codex', args, {
-      cwd: options?.cwd || process.cwd(),
-    });
-    return stripAnsi(result.stdout).trim();
-  }
-}
-```
+- ✅ **Colorful UI** - ASCII banner, colored prompts, status indicators
+- ✅ **Spinner** - Visual feedback while waiting for responses
+- ✅ **Session persistence** - Context maintained across messages
+- ✅ **Interactive mode** - Full tool access with detach/reattach
+- ✅ **Command menu** - Type `/` for autocomplete suggestions
+- ✅ **Forward responses** - One command to send between tools
+- ✅ **Modular adapters** - Easy to add new AI tools
 
 ## Development
 
 ```bash
-# Run in development mode (no build needed)
-npm run dev -- ask claude "test"
+# Development mode
+npm run dev
 
 # Build
 npm run build
 
-# Run built version
-npm start -- ask claude "test"
+# Run
+aic
 ```
 
 ## License

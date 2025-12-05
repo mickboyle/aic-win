@@ -2,22 +2,41 @@ import { createInterface, Interface } from 'readline';
 import { DaemonManager, DaemonConfig } from './daemon.js';
 import { stripAnsi } from './utils.js';
 
-// Daemon configurations
-const CLAUDE_CONFIG: DaemonConfig = {
-  name: 'claude',
-  displayName: 'Claude Code',
-  command: 'claude',
-  args: [], // No args = interactive mode
-  responseTimeout: 3000,
-};
+// Tool configurations - add new tools here
+interface ToolConfig {
+  daemon: DaemonConfig;
+}
 
-const GEMINI_CONFIG: DaemonConfig = {
-  name: 'gemini',
-  displayName: 'Gemini CLI',
-  command: 'gemini',
-  args: [], // No args = interactive mode
-  responseTimeout: 3000,
-};
+const TOOL_CONFIGS: ToolConfig[] = [
+  {
+    daemon: {
+      name: 'claude',
+      displayName: 'Claude Code',
+      command: 'claude',
+      args: [], // No args = interactive mode
+      responseTimeout: 3000,
+    },
+  },
+  {
+    daemon: {
+      name: 'gemini',
+      displayName: 'Gemini CLI',
+      command: 'gemini',
+      args: [], // No args = interactive mode
+      responseTimeout: 3000,
+    },
+  },
+  // Add new tools here, e.g.:
+  // {
+  //   daemon: {
+  //     name: 'codex',
+  //     displayName: 'Codex CLI',
+  //     command: 'codex',
+  //     args: [],
+  //     responseTimeout: 3000,
+  //   },
+  // },
+];
 
 /**
  * Interactive session with persistent daemons
@@ -30,8 +49,10 @@ export class InteractiveSession {
 
   constructor() {
     this.manager = new DaemonManager();
-    this.manager.register(CLAUDE_CONFIG);
-    this.manager.register(GEMINI_CONFIG);
+    // Register all configured tools
+    for (const config of TOOL_CONFIGS) {
+      this.manager.register(config.daemon);
+    }
   }
 
   /**
@@ -52,11 +73,11 @@ export class InteractiveSession {
 
     console.log('\n' + '─'.repeat(50));
     console.log('Commands:');
-    console.log('  //claude            - Switch to Claude');
-    console.log('  //gemini            - Switch to Gemini');
-    console.log('  //forward [msg]     - Forward last response to other tool');
-    console.log('  //status            - Show daemon status');
-    console.log('  //quit              - Exit');
+    console.log('  //claude              - Switch to Claude');
+    console.log('  //gemini              - Switch to Gemini');
+    console.log('  //forward [tool] [msg] - Forward last response');
+    console.log('  //status              - Show daemon status');
+    console.log('  //quit                - Exit');
     console.log('  (Single / commands like /cost go directly to the tool)');
     console.log('─'.repeat(50));
     console.log(`\nActive tool: ${this.manager.getActive()?.displayName}`);
@@ -186,9 +207,12 @@ export class InteractiveSession {
   }
 
   /**
-   * Forward last response to the other tool
+   * Forward last response to another tool
+   * Syntax: //forward [tool] [message]
+   * - If only 2 tools: tool is optional (auto-selects the other)
+   * - If 3+ tools: tool is required
    */
-  private async handleForward(additionalMessage: string): Promise<void> {
+  private async handleForward(argsString: string): Promise<void> {
     // Find the last assistant response
     const lastResponse = [...this.conversationHistory]
       .reverse()
@@ -199,25 +223,64 @@ export class InteractiveSession {
       return;
     }
 
-    // Determine target daemon (opposite of the source)
     const sourceTool = lastResponse.tool;
-    const targetTool = sourceTool === 'claude' ? 'gemini' : 'claude';
+    const allToolNames = this.manager.getNames();
+    const otherTools = allToolNames.filter(t => t !== sourceTool);
+
+    // Parse args: first word might be a tool name
+    const parts = argsString.trim().split(/\s+/).filter(p => p);
+    let targetTool: string;
+    let additionalMessage: string;
+
+    if (parts.length > 0 && otherTools.includes(parts[0].toLowerCase())) {
+      // First arg is a tool name
+      targetTool = parts[0].toLowerCase();
+      additionalMessage = parts.slice(1).join(' ');
+    } else {
+      // No tool specified - auto-select if only one other tool
+      if (otherTools.length === 1) {
+        targetTool = otherTools[0];
+        additionalMessage = argsString;
+      } else {
+        // Multiple tools available - require explicit selection
+        console.log(`Multiple tools available. Please specify target:`);
+        console.log(`  //forward <${otherTools.join('|')}> [message]`);
+        return;
+      }
+    }
+
+    // Validate target tool exists and is not the source
+    if (targetTool === sourceTool) {
+      console.log(`Cannot forward to the same tool (${sourceTool}).`);
+      return;
+    }
 
     const targetDaemon = this.manager.get(targetTool);
-    if (!targetDaemon || !targetDaemon.isReady()) {
-      console.log(`${targetTool} is not ready`);
+    if (!targetDaemon) {
+      console.log(`Unknown tool: ${targetTool}`);
       return;
+    }
+
+    if (!targetDaemon.isReady()) {
+      console.log(`${targetDaemon.displayName} is not ready. Starting...`);
+      try {
+        await this.manager.startOne(targetTool);
+      } catch (error) {
+        console.error(`Failed to start ${targetDaemon.displayName}: ${error instanceof Error ? error.message : error}`);
+        return;
+      }
     }
 
     // Switch to target
     this.manager.setActive(targetTool);
 
     // Build the forward prompt
-    const sourceDisplayName = sourceTool === 'claude' ? 'Claude Code' : 'Gemini CLI';
+    const sourceDaemon = this.manager.get(sourceTool);
+    const sourceDisplayName = sourceDaemon?.displayName || sourceTool;
     let forwardPrompt = `Another AI assistant (${sourceDisplayName}) provided this response. Please review and provide your thoughts:\n\n---\n${lastResponse.content}\n---`;
     
-    if (additionalMessage) {
-      forwardPrompt += `\n\nAdditional context: ${additionalMessage}`;
+    if (additionalMessage.trim()) {
+      forwardPrompt += `\n\nAdditional context: ${additionalMessage.trim()}`;
     }
 
     console.log(`\nForwarding to ${targetDaemon.displayName}...`);

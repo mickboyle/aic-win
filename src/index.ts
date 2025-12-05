@@ -15,10 +15,34 @@ registry.register(new GeminiAdapter());
 // Load config
 const config = loadConfig();
 
+const HELP_TEXT = `
+AIC² - AI Code Connect
+Bridge Claude Code and Gemini CLI in a single session.
+
+Session Commands:
+  //claude              Switch to Claude Code
+  //gemini              Switch to Gemini CLI
+  //i                   Enter interactive mode (Ctrl+] to detach)
+  //forward [tool] [msg] Forward last response to another tool
+  //history             Show conversation history
+  //status              Show running processes
+  //clear               Clear sessions and history
+  //quit, //cya         Exit
+
+Forward Behavior:
+  With 2 tools:  //forward           Auto-selects the other tool
+  With 3+ tools: //forward <tool>    Target tool required
+
+Examples:
+  aic                   Launch interactive session
+  aic tools             List available AI tools
+`;
+
 program
   .name('aic')
   .description('AIC² - AI Code Connect\nBridge Claude Code and Gemini CLI')
-  .version('1.0.0');
+  .version('1.0.0')
+  .addHelpText('after', HELP_TEXT);
 
 // Tools command - list available tools
 program

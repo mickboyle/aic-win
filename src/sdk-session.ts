@@ -71,12 +71,38 @@ ${colors.brightCyan}    ╚═╝  ╚═╝${colors.brightMagenta}╚═╝${co
 const VERSION = 'v1.0.0';
 const TAGLINE = `${colors.dim}─────${colors.reset} ${colors.brightCyan}A${colors.brightMagenta}I${colors.reset} ${colors.brightYellow}C${colors.white}ode${colors.reset} ${colors.brightYellow}C${colors.white}onnect${colors.reset} ${colors.dim}${VERSION} ─────${colors.reset}`;
 
+// Tool configuration - add new tools here
+interface ToolConfig {
+  name: string;
+  displayName: string;
+  color: string;
+}
+
+const AVAILABLE_TOOLS: ToolConfig[] = [
+  { name: 'claude', displayName: 'Claude Code', color: colors.brightCyan },
+  { name: 'gemini', displayName: 'Gemini CLI', color: colors.brightMagenta },
+  // Add new tools here, e.g.:
+  // { name: 'codex', displayName: 'Codex CLI', color: colors.brightGreen },
+];
+
+function getToolConfig(name: string): ToolConfig | undefined {
+  return AVAILABLE_TOOLS.find(t => t.name === name);
+}
+
+function getToolColor(name: string): string {
+  return getToolConfig(name)?.color || colors.white;
+}
+
+function getToolDisplayName(name: string): string {
+  return getToolConfig(name)?.displayName || name;
+}
+
 // AIC command definitions
 const AIC_COMMANDS = [
   { value: '//claude', name: `${colors.brightCyan}//claude${colors.reset}       Switch to Claude Code`, description: 'Switch to Claude Code' },
   { value: '//gemini', name: `${colors.brightMagenta}//gemini${colors.reset}       Switch to Gemini CLI`, description: 'Switch to Gemini CLI' },
   { value: '//i', name: `${colors.brightYellow}//i${colors.reset}            Enter interactive mode`, description: 'Enter interactive mode (Ctrl+] to detach)' },
-  { value: '//forward', name: `${colors.brightGreen}//forward${colors.reset}      Forward last response`, description: 'Forward last response to other tool' },
+  { value: '//forward', name: `${colors.brightGreen}//forward${colors.reset}      Forward last response`, description: 'Forward response: //forward [tool] [msg]' },
   { value: '//history', name: `${colors.blue}//history${colors.reset}      Show conversation`, description: 'Show conversation history' },
   { value: '//status', name: `${colors.gray}//status${colors.reset}       Show running processes`, description: 'Show daemon status' },
   { value: '//clear', name: `${colors.red}//clear${colors.reset}        Clear sessions`, description: 'Clear sessions and history' },
@@ -178,7 +204,7 @@ export class SDKSession {
       `${colorize('//claude', colors.brightCyan)}          Switch to Claude Code`,
       `${colorize('//gemini', colors.brightMagenta)}          Switch to Gemini CLI`,
       `${colorize('//i', colors.brightYellow)}               Enter interactive mode`,
-      `${colorize('//forward', colors.brightGreen)} ${colors.dim}[msg]${colors.reset}    Forward last response`,
+      `${colorize('//forward', colors.brightGreen)} ${colors.dim}[tool] [msg]${colors.reset} Forward response`,
       `${colorize('//history', colors.blue)}         Show conversation`,
       `${colorize('//status', colors.gray)}          Show running processes`,
       `${colorize('//clear', colors.red)}           Clear sessions`,
@@ -734,19 +760,19 @@ export class SDKSession {
 
   private showStatus(): void {
     console.log('');
-    const claudeRunning = this.runningProcesses.has('claude');
-    const geminiRunning = this.runningProcesses.has('gemini');
     
-    const statusLines = [
-      `${colors.brightCyan}◆ Claude Code${colors.reset}  ${claudeRunning ? `${colors.green}● Running${colors.reset}` : `${colors.dim}○ Stopped${colors.reset}`}  ${this.claudeHasSession ? `${colors.dim}(has history)${colors.reset}` : ''}`,
-      `${colors.brightMagenta}◇ Gemini CLI${colors.reset}   ${geminiRunning ? `${colors.green}● Running${colors.reset}` : `${colors.dim}○ Stopped${colors.reset}`}  ${this.geminiHasSession ? `${colors.dim}(has history)${colors.reset}` : ''}`,
-    ];
+    const statusLines = AVAILABLE_TOOLS.map(tool => {
+      const isRunning = this.runningProcesses.has(tool.name);
+      const hasSession = tool.name === 'claude' ? this.claudeHasSession : this.geminiHasSession;
+      const icon = tool.name === 'claude' ? '◆' : '◇';
+      return `${tool.color}${icon} ${tool.displayName.padEnd(12)}${colors.reset} ${isRunning ? `${colors.green}● Running${colors.reset}` : `${colors.dim}○ Stopped${colors.reset}`}  ${hasSession ? `${colors.dim}(has history)${colors.reset}` : ''}`;
+    });
     
     console.log(drawBox(statusLines, 45));
     console.log('');
   }
 
-  private async handleForward(additionalMessage: string): Promise<void> {
+  private async handleForward(argsString: string): Promise<void> {
     // Find the last assistant response
     const lastResponse = [...this.conversationHistory]
       .reverse()
@@ -757,15 +783,46 @@ export class SDKSession {
       return;
     }
 
-    // Switch to the other tool
     const sourceTool = lastResponse.tool;
-    const targetTool = sourceTool === 'claude' ? 'gemini' : 'claude';
+    const otherTools = AVAILABLE_TOOLS
+      .map(t => t.name)
+      .filter(t => t !== sourceTool);
+
+    // Parse args: first word might be a tool name
+    const parts = argsString.trim().split(/\s+/).filter(p => p);
+    let targetTool: string;
+    let additionalMessage: string;
+
+    if (parts.length > 0 && otherTools.includes(parts[0].toLowerCase())) {
+      // First arg is a tool name
+      targetTool = parts[0].toLowerCase();
+      additionalMessage = parts.slice(1).join(' ');
+    } else {
+      // No tool specified - auto-select if only one other tool
+      if (otherTools.length === 1) {
+        targetTool = otherTools[0];
+        additionalMessage = argsString;
+      } else {
+        // Multiple tools available - require explicit selection
+        console.log(`${colors.yellow}Multiple tools available.${colors.reset} Please specify target:`);
+        console.log(`  ${colors.brightGreen}//forward${colors.reset} <${otherTools.join('|')}> [message]`);
+        return;
+      }
+    }
+
+    // Validate target tool exists and is not the source
+    if (targetTool === sourceTool) {
+      console.log(`Cannot forward to the same tool (${sourceTool}).`);
+      return;
+    }
+
+    // Switch to target tool
     this.activeTool = targetTool as 'claude' | 'gemini';
 
-    const sourceDisplayName = sourceTool === 'claude' ? 'Claude Code' : 'Gemini CLI';
-    const targetDisplayName = targetTool === 'claude' ? 'Claude Code' : 'Gemini CLI';
-    const sourceColor = sourceTool === 'claude' ? colors.brightCyan : colors.brightMagenta;
-    const targetColor = targetTool === 'claude' ? colors.brightCyan : colors.brightMagenta;
+    const sourceDisplayName = getToolDisplayName(sourceTool);
+    const targetDisplayName = getToolDisplayName(targetTool);
+    const sourceColor = getToolColor(sourceTool);
+    const targetColor = getToolColor(targetTool);
 
     console.log('');
     console.log(`${colors.dim}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}`);
@@ -776,8 +833,8 @@ export class SDKSession {
     // Build forward prompt
     let forwardPrompt = `Another AI assistant (${sourceDisplayName}) provided this response. Please review and share your thoughts:\n\n---\n${lastResponse.content}\n---`;
     
-    if (additionalMessage) {
-      forwardPrompt += `\n\nAdditional context: ${additionalMessage}`;
+    if (additionalMessage.trim()) {
+      forwardPrompt += `\n\nAdditional context: ${additionalMessage.trim()}`;
     }
 
     await this.sendToTool(forwardPrompt);

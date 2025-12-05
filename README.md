@@ -74,8 +74,9 @@ That's it! This launches the interactive session.
 | `//claude` | Switch to Claude Code |
 | `//gemini` | Switch to Gemini CLI |
 | `//i` | Enter interactive mode (full tool access) |
-| `//forward` | Forward last response to other tool |
-| `//forward [msg]` | Forward with additional context |
+| `//forward` | Forward last response to other tool (auto-selects if 2 tools) |
+| `//forward [tool]` | Forward to specific tool (required if 3+ tools) |
+| `//forward [tool] [msg]` | Forward with additional context |
 | `//history` | Show conversation history |
 | `//status` | Show running processes |
 | `//clear` | Clear sessions and history |
@@ -173,7 +174,7 @@ AIC² is modular. To add a new AI CLI (e.g., OpenAI Codex):
 3. Register in `src/adapters/index.ts` and `src/index.ts`
 4. Add to `src/sdk-session.ts`
 
-See [ADDING_TOOLS.md](ADDING_TOOLS.md) for detailed instructions.
+See [ADDINGAI_CLIs.md](ADDINGAI_CLIs.md) for detailed instructions.
 
 ## Features
 

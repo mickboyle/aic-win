@@ -97,41 +97,65 @@ registry.register(new CodexAdapter());  // Add this line
 
 Edit `src/sdk-session.ts`:
 
-1. Add the tool type:
+1. **Add to AVAILABLE_TOOLS array** (near the top of the file):
+```typescript
+const AVAILABLE_TOOLS: ToolConfig[] = [
+  { name: 'claude', displayName: 'Claude Code', color: colors.brightCyan },
+  { name: 'gemini', displayName: 'Gemini CLI', color: colors.brightMagenta },
+  { name: 'codex', displayName: 'OpenAI Codex', color: colors.brightGreen },  // Add this
+];
+```
+
+2. **Add the tool type** to activeTool:
 ```typescript
 private activeTool: 'claude' | 'gemini' | 'codex' = 'claude';
 ```
 
-2. Add session tracking:
+3. **Add session tracking**:
 ```typescript
 private codexHasSession = false;
 ```
 
-3. Add to `sendToTool()`:
+4. **Add to `sendToTool()`**:
 ```typescript
 if (this.activeTool === 'codex') {
   response = await this.sendToCodex(message);
 }
 ```
 
-4. Add the send method (copy from sendToClaude/sendToGemini as template)
+5. Add the send method (copy from sendToClaude/sendToGemini as template)
 
-5. Add color for the tool:
-```typescript
-const toolColor = this.activeTool === 'codex' ? colors.brightGreen : ...
-```
-
-6. Add to command menu (AIC_COMMANDS array):
+6. **Add to command menu** (AIC_COMMANDS array):
 ```typescript
 { value: '//codex', name: '//codex        Switch to Codex', description: 'Switch to OpenAI Codex' },
 ```
 
-7. Add to handleMetaCommand switch:
+7. **Add to handleMetaCommand switch**:
 ```typescript
 case 'codex':
   this.activeTool = 'codex';
   console.log(`Switched to OpenAI Codex`);
   break;
+```
+
+### Step 3b: Add to Interactive Session (optional)
+
+If you also want the tool in daemon mode, edit `src/interactive.ts`:
+
+Add to `TOOL_CONFIGS` array:
+```typescript
+const TOOL_CONFIGS: ToolConfig[] = [
+  // ... existing tools ...
+  {
+    daemon: {
+      name: 'codex',
+      displayName: 'OpenAI Codex',
+      command: 'codex',
+      args: [],
+      responseTimeout: 3000,
+    },
+  },
+];
 ```
 
 ### Step 4: Build and Test
@@ -149,6 +173,13 @@ Each CLI tool handles session continuation differently:
 - **Claude Code**: `--continue` flag
 - **Gemini CLI**: `--resume latest` flag
 - **Your tool**: Check your tool's documentation
+
+### Forward Behavior
+The `//forward` command behavior changes based on how many tools are registered:
+- **2 tools**: `//forward` auto-selects the other tool (no argument needed)
+- **3+ tools**: User must specify target: `//forward <tool> [message]`
+
+This is handled automatically—no additional code needed when adding tools.
 
 ### Interactive Mode
 For interactive mode (//i), the tool needs to support running in a PTY.

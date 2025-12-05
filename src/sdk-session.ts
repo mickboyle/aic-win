@@ -1,7 +1,7 @@
 import { spawn, ChildProcess } from 'child_process';
+import { createInterface, Interface, CompleterResult } from 'readline';
 import * as pty from 'node-pty';
 import { IPty } from 'node-pty';
-import { select } from '@inquirer/prompts';
 import { stripAnsi } from './utils.js';
 
 interface Message {
@@ -180,6 +180,10 @@ export class SDKSession {
   
   // Working directory
   private cwd: string;
+  
+  // Readline interface for input with history
+  private rl: Interface | null = null;
+  private inputHistory: string[] = [];
 
   constructor(cwd?: string) {
     this.cwd = cwd || process.cwd();
@@ -214,8 +218,9 @@ export class SDKSession {
     console.log('');
     
     // Tips
+    console.log(`${colors.dim}💡 Press ${colors.brightYellow}Tab${colors.dim} to autocomplete commands${colors.reset}`);
+    console.log(`${colors.dim}💡 Press ${colors.brightYellow}↑/↓${colors.dim} to cycle through command history${colors.reset}`);
     console.log(`${colors.dim}💡 Press ${colors.brightYellow}Ctrl+]${colors.dim} to detach from interactive mode${colors.reset}`);
-    console.log(`${colors.dim}💡 Sessions persist with ${colors.cyan}--continue${colors.dim}/${colors.magenta}--resume${colors.reset}`);
     console.log('');
     
     // Show active tool
@@ -231,35 +236,68 @@ export class SDKSession {
   private getPrompt(): string {
     const toolColor = this.activeTool === 'claude' ? colors.brightCyan : colors.brightMagenta;
     const toolName = this.activeTool === 'claude' ? 'claude' : 'gemini';
-    // Ensure cursor is visible and set to blinking block, then show prompt
-    return `${cursor.show}${cursor.blockBlink}${toolColor}❯ ${toolName}${colors.reset} ${colors.dim}→${colors.reset} `;
+    return `${toolColor}❯ ${toolName}${colors.reset} ${colors.dim}→${colors.reset} `;
   }
 
-  private async showCommandMenu(): Promise<string | null> {
-    try {
-      const answer = await select({
-        message: `${colors.brightYellow}Select a command:${colors.reset}`,
-        choices: AIC_COMMANDS,
-        loop: true,
-      });
-      return answer;
-    } catch (e) {
-      // User cancelled (Ctrl+C)
-      return null;
+  /**
+   * Tab completion for // commands
+   */
+  private completer(line: string): CompleterResult {
+    const commands = ['//claude', '//gemini', '//i', '//forward', '//history', '//status', '//clear', '//quit', '//cya'];
+    
+    // Only complete if line starts with /
+    if (line.startsWith('/')) {
+      const hits = commands.filter(c => c.startsWith(line));
+      // Show all commands if no specific match, or show matches
+      return [hits.length ? hits : commands, line];
     }
+    
+    // No completion for regular input
+    return [[], line];
+  }
+
+  private setupReadline(): void {
+    this.rl = createInterface({
+      input: process.stdin,
+      output: process.stdout,
+      completer: this.completer.bind(this),
+      history: this.inputHistory,
+      historySize: 100,
+      prompt: this.getPrompt(),
+    });
+
+    // Handle Ctrl+C gracefully
+    this.rl.on('SIGINT', () => {
+      console.log('\n');
+      this.rl?.close();
+      this.cleanup().then(() => {
+        console.log(`${colors.brightYellow}👋 Goodbye!${colors.reset}\n`);
+        process.exit(0);
+      });
+    });
   }
 
   private async runLoop(): Promise<void> {
+    this.setupReadline();
     await this.promptLoop();
   }
 
   private async promptLoop(): Promise<void> {
     while (this.isRunning) {
-      const input = await this.readInputWithSlashDetection();
+      const input = await this.readInput();
       
       if (!input || !input.trim()) continue;
       
       const trimmed = input.trim();
+
+      // Add to history (readline handles this, but we track for persistence)
+      if (trimmed && !this.inputHistory.includes(trimmed)) {
+        this.inputHistory.push(trimmed);
+        // Keep history manageable
+        if (this.inputHistory.length > 100) {
+          this.inputHistory.shift();
+        }
+      }
 
       // Handle meta commands (double slash)
       if (trimmed.startsWith('//')) {
@@ -272,131 +310,15 @@ export class SDKSession {
     }
   }
 
-  private readInputWithSlashDetection(): Promise<string> {
+  private readInput(): Promise<string> {
     return new Promise((resolve) => {
-      let buffer = '';
-      let hintsShown = false;
-      const HINT_LINES = 10; // Number of hint lines we show
+      // Update prompt in case tool changed
+      this.rl?.setPrompt(this.getPrompt());
+      this.rl?.prompt();
       
-      // Show prompt
-      process.stdout.write(this.getPrompt());
-      
-      // Set raw mode for keypress detection
-      if (process.stdin.isTTY) {
-        process.stdin.setRawMode(true);
-      }
-      process.stdin.resume();
-
-      const clearHints = () => {
-        if (hintsShown) {
-          // Save cursor, go down to hints, clear them, restore cursor
-          process.stdout.write('\x1b[s'); // Save cursor position
-          process.stdout.write('\n'); // Move to next line
-          for (let i = 0; i < HINT_LINES; i++) {
-            process.stdout.write('\x1b[2K\x1b[B'); // Clear line, move down
-          }
-          process.stdout.write('\x1b[u'); // Restore cursor position
-          hintsShown = false;
-        }
-      };
-
-      const showHints = () => {
-        if (!hintsShown) {
-          // Save cursor position
-          process.stdout.write('\x1b[s');
-          // Move to next line and show hints
-          process.stdout.write('\n');
-          process.stdout.write(`${colors.dim}  ↓ down to select, or keep typing${colors.reset}\n`);
-          process.stdout.write(`${colors.dim}  ─────────────────────────────────${colors.reset}\n`);
-          AIC_COMMANDS.slice(0, 7).forEach(cmd => {
-            process.stdout.write(`  ${cmd.name}\n`);
-          });
-          // Restore cursor to input line
-          process.stdout.write('\x1b[u');
-          hintsShown = true;
-        }
-      };
-
-      const cleanup = () => {
-        process.stdin.removeListener('data', onData);
-        if (process.stdin.isTTY) {
-          process.stdin.setRawMode(false);
-        }
-        if (hintsShown) {
-          // Clear hints before exiting
-          process.stdout.write('\x1b[s');
-          process.stdout.write('\n');
-          for (let i = 0; i < HINT_LINES; i++) {
-            process.stdout.write('\x1b[2K\x1b[B');
-          }
-          process.stdout.write('\x1b[u');
-          hintsShown = false;
-        }
-      };
-
-      const onData = async (data: Buffer) => {
-        const char = data.toString();
-        
-        // Handle Enter
-        if (char === '\r' || char === '\n') {
-          cleanup();
-          process.stdout.write('\n');
-          resolve(buffer);
-          return;
-        }
-        
-        // Handle Ctrl+C
-        if (char === '\x03') {
-          cleanup();
-          console.log('\n');
-          resolve('//quit');
-          return;
-        }
-        
-        // Handle Backspace
-        if (char === '\x7f' || char === '\b') {
-          if (buffer.length > 0) {
-            buffer = buffer.slice(0, -1);
-            process.stdout.write('\b \b');
-            // Hide hints if we backspace past the slash
-            if (!buffer.startsWith('/')) {
-              clearHints();
-            }
-          }
-          return;
-        }
-
-        // Handle Down Arrow - enter selection mode if hints are shown
-        if (char === '\x1b[B' && hintsShown) {
-          cleanup();
-          process.stdout.write('\n');
-          const selected = await this.showCommandMenu();
-          if (selected) {
-            resolve(selected);
-          } else {
-            resolve('');
-          }
-          return;
-        }
-
-        // Filter out other escape sequences (iTerm focus events etc)
-        if (char.startsWith('\x1b')) {
-          return;
-        }
-        
-        // Regular character - write it
-        buffer += char;
-        process.stdout.write(char);
-        
-        // Show hints when user types "/" or "//"
-        if (buffer === '/' || buffer === '//') {
-          showHints();
-        } else if (!buffer.startsWith('/')) {
-          clearHints();
-        }
-      };
-
-      process.stdin.on('data', onData);
+      this.rl?.once('line', (line) => {
+        resolve(line);
+      });
     });
   }
 

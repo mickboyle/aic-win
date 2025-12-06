@@ -255,6 +255,11 @@ class Spinner {
   private intervalId: NodeJS.Timeout | null = null;
   private frameIndex = 0;
   private message: string;
+  private startTime: number = 0;
+  private warningShown = false;
+  private readonly WARNING_THRESHOLD_MS = 60000; // 60 seconds
+  private readonly WARNING_REPEAT_MS = 30000;    // Repeat every 30s after first warning
+  private lastWarningTime: number = 0;
 
   constructor(message: string = 'Thinking') {
     this.message = message;
@@ -262,24 +267,54 @@ class Spinner {
 
   start(): void {
     this.frameIndex = 0;
+    this.startTime = Date.now();
+    this.warningShown = false;
+    this.lastWarningTime = 0;
+
     // Clear any garbage on the current line before starting spinner
     process.stdout.write('\x1b[2K\r');
-    process.stdout.write(`\n${SPINNER_FRAMES[0]} ${this.message}...`);
-    
+    process.stdout.write(`\n${SPINNER_FRAMES[0]} ${this.message} ...`);
+
     this.intervalId = setInterval(() => {
       this.frameIndex = (this.frameIndex + 1) % SPINNER_FRAMES.length;
+      const elapsed = Date.now() - this.startTime;
+      const elapsedSec = Math.floor(elapsed / 1000);
+
+      // Build the spinner line with elapsed time
+      const elapsedDisplay = elapsedSec > 0 ? ` (${elapsedSec}s)` : '';
+
       // Move cursor back and overwrite
-      process.stdout.write(`\r${SPINNER_FRAMES[this.frameIndex]} ${this.message}...`);
+      process.stdout.write(`\r${SPINNER_FRAMES[this.frameIndex]} ${this.message} ...${elapsedDisplay}   `);
+
+      // Check if we should show a timeout warning
+      if (elapsed >= this.WARNING_THRESHOLD_MS) {
+        const timeSinceLastWarning = elapsed - this.lastWarningTime;
+        if (!this.warningShown || timeSinceLastWarning >= this.WARNING_REPEAT_MS) {
+          this.showTimeoutWarning(elapsedSec);
+          this.warningShown = true;
+          this.lastWarningTime = elapsed;
+        }
+      }
     }, 80);
+  }
+
+  private showTimeoutWarning(elapsedSec: number): void {
+    // Save cursor, move to new line, print warning, restore
+    process.stdout.write('\n');
+    process.stdout.write(`${colors.yellow}⚠ Still working... (${elapsedSec}s)${colors.reset} - Press ${colors.bold}Ctrl+C${colors.reset} to cancel this request only\n`);
   }
 
   stop(): void {
     if (this.intervalId) {
       clearInterval(this.intervalId);
       this.intervalId = null;
-      // Clear the spinner line
-      process.stdout.write('\r' + ' '.repeat(this.message.length + 15) + '\r');
+      // Clear the spinner line (account for longer line with elapsed time)
+      process.stdout.write('\r' + ' '.repeat(this.message.length + 30) + '\r');
     }
+  }
+
+  getElapsedMs(): number {
+    return Date.now() - this.startTime;
   }
 }
 
@@ -309,6 +344,10 @@ export class SDKSession {
   // Readline interface for input with history
   private rl: Interface | null = null;
   private inputHistory: string[] = [];
+
+  // Current running process (for cancellation support)
+  private currentProcess: ChildProcess | null = null;
+  private cancelRequested = false;
 
   constructor(cwd?: string) {
     this.cwd = cwd || process.cwd();
@@ -487,8 +526,18 @@ export class SDKSession {
       prompt: this.getPrompt(),
     });
 
-    // Handle Ctrl+C gracefully
+    // Handle Ctrl+C gracefully - cancel current operation or exit
     this.rl.on('SIGINT', () => {
+      // If a request is in progress, cancel just that request
+      if (this.currentProcess) {
+        console.log(`\n${colors.yellow}Cancelling current request...${colors.reset}`);
+        this.cancelRequested = true;
+        this.currentProcess.kill('SIGTERM');
+        // The process close handler will clean up and reject the promise
+        return;
+      }
+
+      // No request in progress - exit the application
       console.log('\n');
       this.rl?.close();
       this.cleanup().then(() => {
@@ -719,7 +768,15 @@ export class SDKSession {
         content: response,
       });
     } catch (error) {
-      console.error(`\nError: ${error instanceof Error ? error.message : error}\n`);
+      const errorMessage = error instanceof Error ? error.message : String(error);
+
+      // Handle cancellation gracefully - not an error
+      if (errorMessage === 'Request cancelled by user') {
+        console.log(`${colors.dim}Request cancelled. You can try again or use /i to check the session.${colors.reset}\n`);
+      } else {
+        console.error(`\n${colors.red}Error:${colors.reset} ${errorMessage}\n`);
+      }
+
       // Remove the user message if failed
       this.conversationHistory.pop();
     }
@@ -728,41 +785,51 @@ export class SDKSession {
   private sendToClaude(message: string): Promise<string> {
     return new Promise((resolve, reject) => {
       const args: string[] = ['-p']; // Print mode for regular messages
-      
+
       // Continue session if we have one
       if (this.claudeHasSession) {
         args.push('--continue');
       }
-      
-      // Add the message
-      args.push(message);
+
+      // Use stdin for message to avoid E2BIG error with large messages
+      // Claude CLI accepts message from stdin when no message arg is provided
+      args.push('--');  // End of options marker
 
       // Start spinner
       const spinner = new Spinner(`${colors.brightCyan}Claude${colors.reset} is thinking`);
       spinner.start();
-      
-      const proc = spawn('claude', args, {
+
+      // Store reference for cancellation
+      this.currentProcess = spawn('claude', args, {
         cwd: this.cwd,
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ['pipe', 'pipe', 'pipe'],  // Changed to 'pipe' for stdin
         env: process.env,
       });
+      const proc = this.currentProcess;
 
       let stdout = '';
       let stderr = '';
 
-      proc.stdout.on('data', (data) => {
+      proc.stdout!.on('data', (data) => {
         stdout += data.toString();
       });
 
-      proc.stderr.on('data', (data) => {
+      proc.stderr!.on('data', (data) => {
         stderr += data.toString();
       });
 
       proc.on('close', (code) => {
         spinner.stop();
+        this.currentProcess = null;
 
         if (code !== 0) {
-          reject(new Error(`Claude exited with code ${code}: ${stderr || stdout}`));
+          // Check if it was cancelled
+          if (this.cancelRequested) {
+            this.cancelRequested = false;
+            reject(new Error('Request cancelled by user'));
+          } else {
+            reject(new Error(`Claude exited with code ${code}: ${stderr || stdout}`));
+          }
         } else {
           // Render the response with markdown formatting
           console.log('');
@@ -777,8 +844,13 @@ export class SDKSession {
 
       proc.on('error', (err) => {
         spinner.stop();
+        this.currentProcess = null;
         reject(err);
       });
+
+      // Write message to stdin and close it
+      proc.stdin!.write(message);
+      proc.stdin!.end();
     });
   }
 
@@ -786,41 +858,51 @@ export class SDKSession {
   private sendToGemini(message: string): Promise<string> {
     return new Promise((resolve, reject) => {
       const args: string[] = [];
-      
+
       // Resume session if we have one
       if (this.geminiHasSession) {
         args.push('--resume', 'latest');
       }
-      
-      // Add the message
-      args.push(message);
+
+      // Use stdin for message to avoid E2BIG error with large messages
+      // Gemini CLI accepts message from stdin when piped
+      args.push('--');  // End of options marker
 
       // Start spinner
       const spinner = new Spinner(`${colors.brightMagenta}Gemini${colors.reset} is thinking`);
       spinner.start();
-      
-      const proc = spawn('gemini', args, {
+
+      // Store reference for cancellation
+      this.currentProcess = spawn('gemini', args, {
         cwd: this.cwd,
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ['pipe', 'pipe', 'pipe'],  // Changed to 'pipe' for stdin
         env: process.env,
       });
+      const proc = this.currentProcess;
 
       let stdout = '';
       let stderr = '';
 
-      proc.stdout.on('data', (data) => {
+      proc.stdout!.on('data', (data) => {
         stdout += data.toString();
       });
 
-      proc.stderr.on('data', (data) => {
+      proc.stderr!.on('data', (data) => {
         stderr += data.toString();
       });
 
       proc.on('close', (code) => {
         spinner.stop();
+        this.currentProcess = null;
 
         if (code !== 0) {
-          reject(new Error(`Gemini exited with code ${code}: ${stderr || stdout}`));
+          // Check if it was cancelled
+          if (this.cancelRequested) {
+            this.cancelRequested = false;
+            reject(new Error('Request cancelled by user'));
+          } else {
+            reject(new Error(`Gemini exited with code ${code}: ${stderr || stdout}`));
+          }
         } else {
           // Render the response with markdown formatting
           console.log('');
@@ -835,8 +917,13 @@ export class SDKSession {
 
       proc.on('error', (err) => {
         spinner.stop();
+        this.currentProcess = null;
         reject(err);
       });
+
+      // Write message to stdin and close it
+      proc.stdin!.write(message);
+      proc.stdin!.end();
     });
   }
 
@@ -1440,15 +1527,40 @@ export class SDKSession {
 
   private showStatus(): void {
     console.log('');
-    
+
     const statusLines = AVAILABLE_TOOLS.map(tool => {
-      const isRunning = this.runningProcesses.has(tool.name);
+      const ptyProcess = this.runningProcesses.get(tool.name);
       const hasSession = tool.name === 'claude' ? this.claudeHasSession : this.geminiHasSession;
       const icon = tool.name === 'claude' ? '◆' : '◇';
-      return `${tool.color}${icon} ${tool.displayName.padEnd(12)}${colors.reset} ${isRunning ? `${colors.green}● Running${colors.reset}` : `${colors.dim}○ Stopped${colors.reset}`}  ${hasSession ? `${colors.dim}(has history)${colors.reset}` : ''}`;
+
+      let status: string;
+      if (ptyProcess) {
+        // Check if the PTY process is still alive by checking its pid
+        try {
+          // process.kill with signal 0 checks if process exists without killing it
+          process.kill(ptyProcess.pid, 0);
+          status = `${colors.green}● Running${colors.reset} (PID: ${ptyProcess.pid})`;
+        } catch {
+          // Process is dead but we haven't cleaned up yet
+          status = `${colors.red}● Dead${colors.reset} (cleaning up...)`;
+          // Clean up the dead process
+          this.runningProcesses.delete(tool.name);
+        }
+      } else {
+        status = `${colors.dim}○ Stopped${colors.reset}`;
+      }
+
+      const historyNote = hasSession ? `${colors.dim}(has history)${colors.reset}` : '';
+      return `${tool.color}${icon} ${tool.displayName.padEnd(12)}${colors.reset} ${status}  ${historyNote}`;
     });
-    
-    console.log(drawBox(statusLines, 45));
+
+    // Add current request status
+    if (this.currentProcess) {
+      statusLines.push('');
+      statusLines.push(`${colors.yellow}⏳ Request in progress${colors.reset} - Ctrl+C to cancel`);
+    }
+
+    console.log(drawBox(statusLines, 50));
     console.log('');
   }
 

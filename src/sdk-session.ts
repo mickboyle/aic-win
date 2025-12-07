@@ -1127,10 +1127,6 @@ export class SDKSession {
 
         this.rl?.close();
         this.setupReadline();
-
-        setTimeout(() => {
-          process.stdout.write('\x1b[2K\r');
-        }, 100);
       };
     });
   }

@@ -7,6 +7,7 @@ import TerminalRenderer from 'marked-terminal';
 import { stripAnsi } from './utils.js';
 import { getDefaultTool, setDefaultTool } from './config.js';
 import { VERSION } from './version.js';
+import { AdapterRegistry } from './adapters/base.js';
 
 /**
  * Get the version of a CLI tool
@@ -367,20 +368,23 @@ export class SDKSession {
   private isRunning = false;
   private activeTool: 'claude' | 'gemini';
   private conversationHistory: Message[] = [];
-  
+
+  // Adapter registry for tool lookup
+  private registry: AdapterRegistry;
+
   // Session tracking (for print mode)
   private claudeHasSession = false;
   private geminiHasSession = false;
-  
+
   // Persistent PTY processes for interactive mode
   private runningProcesses: Map<string, IPty> = new Map();
-  
+
   // Buffer to capture interactive mode output for forwarding
   private interactiveOutputBuffer: Map<string, string> = new Map();
-  
+
   // Working directory
   private cwd: string;
-  
+
   // Readline interface for input with history
   private rl: Interface | null = null;
   private inputHistory: string[] = [];
@@ -388,7 +392,8 @@ export class SDKSession {
   // Request state management
   private requestInProgress = false;
 
-  constructor(cwd?: string) {
+  constructor(registry: AdapterRegistry, cwd?: string) {
+    this.registry = registry;
     this.cwd = cwd || process.cwd();
     // Load default tool from config (or env var)
     this.activeTool = getDefaultTool() as 'claude' | 'gemini';
@@ -1029,10 +1034,11 @@ export class SDKSession {
    * - Use /exit in the tool to terminate the process
    */
   private async enterInteractiveMode(): Promise<void> {
-    const toolName = this.activeTool === 'claude' ? 'Claude Code' : 'Gemini CLI';
-    const toolColor = this.activeTool === 'claude' ? colors.brightCyan : colors.brightMagenta;
-    const command = this.activeTool;
-    
+    // Get adapter for active tool
+    const adapter = this.registry.get(this.activeTool);
+    const toolName = adapter?.displayName || this.activeTool;
+    const toolColor = adapter?.color || colors.white;
+
     // Check if we already have a running process
     let ptyProcess = this.runningProcesses.get(this.activeTool);
     const isReattach = ptyProcess !== undefined;
@@ -1046,7 +1052,7 @@ export class SDKSession {
       console.log(`\n${colors.green}▶${colors.reset} Starting ${toolColor}${toolName}${colors.reset} interactive mode...`);
     }
     console.log(`${colors.dim}Press ${colors.brightYellow}Ctrl+]${colors.dim} or ${colors.brightYellow}Ctrl+\\${colors.dim} to detach • ${colors.white}/exit${colors.dim} to terminate${colors.reset}\n`);
-    
+
     // Clear the output buffer for fresh capture
     this.interactiveOutputBuffer.set(this.activeTool, '');
 
@@ -1055,14 +1061,9 @@ export class SDKSession {
     return new Promise((resolve) => {
       // Spawn new process if needed
       if (!ptyProcess) {
-        const args: string[] = [];
-        
-        // Continue/resume session if we have history from print mode
-        if (this.activeTool === 'claude' && this.claudeHasSession) {
-          args.push('--continue');
-        } else if (this.activeTool === 'gemini' && this.geminiHasSession) {
-          args.push('--resume', 'latest');
-        }
+        // Get command from adapter (handles --continue/--resume flags)
+        const hasSession = this.activeTool === 'claude' ? this.claudeHasSession : this.geminiHasSession;
+        const [command, ...args] = adapter?.getInteractiveCommand({ continueSession: hasSession }) || [this.activeTool];
 
         ptyProcess = pty.spawn(command, args, {
           name: 'xterm-256color',
@@ -1305,11 +1306,12 @@ export class SDKSession {
    * Enter interactive mode and automatically send a slash command
    * User stays in interactive mode to see output and interact, then Ctrl+] to return
    */
-  private async enterInteractiveModeWithCommand(command: string): Promise<void> {
-    const toolName = this.activeTool === 'claude' ? 'Claude Code' : 'Gemini CLI';
-    const toolColor = this.activeTool === 'claude' ? colors.brightCyan : colors.brightMagenta;
-    const toolCmd = this.activeTool;
-    
+  private async enterInteractiveModeWithCommand(slashCommand: string): Promise<void> {
+    // Get adapter for active tool
+    const adapter = this.registry.get(this.activeTool);
+    const toolName = adapter?.displayName || this.activeTool;
+    const toolColor = adapter?.color || colors.white;
+
     // Check if we already have a running process
     let ptyProcess = this.runningProcesses.get(this.activeTool);
     const isReattach = ptyProcess !== undefined;
@@ -1317,24 +1319,19 @@ export class SDKSession {
     // Pause readline to prevent interference with raw input
     this.rl?.pause();
 
-    console.log(`${colors.dim}Sending ${colors.brightYellow}${command}${colors.dim}... Press ${colors.brightYellow}Ctrl+]${colors.dim} or ${colors.brightYellow}Ctrl+\\${colors.dim} to return${colors.reset}\n`);
-    
+    console.log(`${colors.dim}Sending ${colors.brightYellow}${slashCommand}${colors.dim}... Press ${colors.brightYellow}Ctrl+]${colors.dim} or ${colors.brightYellow}Ctrl+\\${colors.dim} to return${colors.reset}\n`);
+
     // Clear the output buffer for fresh capture
     this.interactiveOutputBuffer.set(this.activeTool, '');
 
     return new Promise((resolve) => {
       // Spawn new process if needed
       if (!ptyProcess) {
-        const args: string[] = [];
-        
-        // Continue/resume session if we have history from print mode
-        if (this.activeTool === 'claude' && this.claudeHasSession) {
-          args.push('--continue');
-        } else if (this.activeTool === 'gemini' && this.geminiHasSession) {
-          args.push('--resume', 'latest');
-        }
+        // Get command from adapter (handles --continue/--resume flags)
+        const hasSession = this.activeTool === 'claude' ? this.claudeHasSession : this.geminiHasSession;
+        const [cmd, ...args] = adapter?.getInteractiveCommand({ continueSession: hasSession }) || [this.activeTool];
 
-        ptyProcess = pty.spawn(toolCmd, args, {
+        ptyProcess = pty.spawn(cmd, args, {
           name: 'xterm-256color',
           cols: process.stdout.columns || 80,
           rows: process.stdout.rows || 24,
@@ -1378,7 +1375,7 @@ export class SDKSession {
         
         // Type command character by character for reliability
         let i = 0;
-        const fullCommand = command + '\r';
+        const fullCommand = slashCommand + '\r';
         const typeNextChar = () => {
           if (i < fullCommand.length) {
             ptyProcess!.write(fullCommand[i]);
@@ -1751,7 +1748,7 @@ export class SDKSession {
   }
 }
 
-export async function startSDKSession(): Promise<void> {
-  const session = new SDKSession();
+export async function startSDKSession(registry: AdapterRegistry): Promise<void> {
+  const session = new SDKSession(registry);
   await session.start();
 }

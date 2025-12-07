@@ -15,10 +15,13 @@ export interface SendOptions {
 export interface ToolAdapter {
   /** Unique name identifier for the tool */
   readonly name: string;
-  
+
   /** Display name for the tool */
   readonly displayName: string;
-  
+
+  /** ANSI color code for the tool (e.g., '\x1b[96m' for bright cyan) */
+  readonly color: string;
+
   /** Check if the tool is installed and available */
   isAvailable(): Promise<boolean>;
   
@@ -30,7 +33,10 @@ export interface ToolAdapter {
   
   /** Get the command that would be executed (for debugging) */
   getCommand(prompt: string, options?: SendOptions): string[];
-  
+
+  /** Get the command to start an interactive session */
+  getInteractiveCommand(options?: SendOptions): string[];
+
   /** Check if there's an active session with this tool */
   hasSession(): boolean;
   

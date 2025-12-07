@@ -12,7 +12,8 @@ import { runCommandPty, commandExists, stripAnsi } from '../utils.js';
 export class ClaudeAdapter implements ToolAdapter {
   readonly name = 'claude';
   readonly displayName = 'Claude Code';
-  
+  readonly color = '\x1b[96m'; // brightCyan
+
   private hasActiveSession = false;
   
   async isAvailable(): Promise<boolean> {
@@ -46,7 +47,16 @@ export class ClaudeAdapter implements ToolAdapter {
     
     return ['claude', ...args];
   }
-  
+
+  getInteractiveCommand(options?: SendOptions): string[] {
+    const args: string[] = [];
+    // Continue session if we have one
+    if (options?.continueSession !== false && this.hasActiveSession) {
+      args.push('--continue');
+    }
+    return ['claude', ...args];
+  }
+
   async send(prompt: string, options?: SendOptions): Promise<string> {
     const isSlashCommand = prompt.startsWith('/');
     const args = this.getCommand(prompt, options).slice(1); // Remove 'claude' from start

@@ -102,7 +102,7 @@ configCmd
 // Default action - start interactive session
 program
   .action(async () => {
-    await startSDKSession();
+    await startSDKSession(registry);
   });
 
 program.parse();

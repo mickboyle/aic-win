@@ -13,7 +13,8 @@ import { runCommandPty, commandExists, stripAnsi } from '../utils.js';
 export class GeminiAdapter implements ToolAdapter {
   readonly name = 'gemini';
   readonly displayName = 'Gemini CLI';
-  
+  readonly color = '\x1b[95m'; // brightMagenta
+
   private hasActiveSession = false;
   
   async isAvailable(): Promise<boolean> {
@@ -38,7 +39,16 @@ export class GeminiAdapter implements ToolAdapter {
     
     return ['gemini', ...args];
   }
-  
+
+  getInteractiveCommand(options?: SendOptions): string[] {
+    const args: string[] = [];
+    // Resume session if we have one
+    if (options?.continueSession !== false && this.hasActiveSession) {
+      args.push('--resume', 'latest');
+    }
+    return ['gemini', ...args];
+  }
+
   async send(prompt: string, options?: SendOptions): Promise<string> {
     const args = this.getCommand(prompt, options).slice(1); // Remove 'gemini' from start
     

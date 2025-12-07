@@ -912,8 +912,10 @@ export class SDKSession {
     const manager = await this.getOrCreateManager(this.activeTool, false);
     const isReattach = manager.isUserAttached() === false && manager.getState() !== PtyState.DEAD;
 
-    // Pause readline to prevent interference with raw input
-    this.rl?.pause();
+    // Close readline completely to prevent interference with raw input
+    // (pause() is not enough - readline continues to echo input)
+    this.rl?.close();
+    this.rl = null;
 
     // Show rainbow "Entering Interactive Mode" message
     await animateRainbow(`Entering Interactive Mode for ${toolName}...`, 500);
@@ -951,8 +953,9 @@ export class SDKSession {
     // Get or create the persistent PTY manager (don't wait - user sees startup)
     const manager = await this.getOrCreateManager(this.activeTool, false);
 
-    // Pause readline
-    this.rl?.pause();
+    // Close readline completely to prevent interference with raw input
+    this.rl?.close();
+    this.rl = null;
 
     console.log(`${colors.dim}Sending ${colors.brightYellow}${slashCommand}${colors.dim}... Press ${colors.brightYellow}Ctrl+]${colors.dim} or ${colors.brightYellow}Ctrl+\\${colors.dim} to return${colors.reset}\n`);
 
@@ -995,8 +998,9 @@ export class SDKSession {
     // Get or create the persistent PTY manager (don't wait - user sees startup)
     const manager = await this.getOrCreateManager(this.activeTool, false);
 
-    // Pause readline
-    this.rl?.pause();
+    // Close readline completely to prevent interference with raw input
+    this.rl?.close();
+    this.rl = null;
 
     console.log(`${colors.dim}Sending prompt... Press ${colors.brightYellow}Ctrl+]${colors.dim} or ${colors.brightYellow}Ctrl+\\${colors.dim} to return when done${colors.reset}\n`);
 

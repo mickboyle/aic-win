@@ -85,6 +85,9 @@ export class PersistentPtyManager {
   private readyPromise: Promise<void> | null = null;
   private readyResolve: (() => void) | null = null;
 
+  // Flag to suppress exit messages when intentionally killed
+  private suppressExitMessage: boolean = false;
+
   constructor(private config: PtyConfig) {}
 
   /**
@@ -314,6 +317,12 @@ export class PersistentPtyManager {
     this.pty = null;
     this.isReady = false;
 
+    // If killed silently, don't show messages or call callbacks
+    if (this.suppressExitMessage) {
+      this.suppressExitMessage = false;
+      return;
+    }
+
     // Reject any pending capture
     if (this.currentCapture) {
       clearTimeout(this.currentCapture.timeoutId);
@@ -428,8 +437,13 @@ export class PersistentPtyManager {
 
   /**
    * Kill the PTY process
+   * @param silent If true, suppress the onExit callback (for intentional kills)
    */
-  kill(): void {
+  kill(silent: boolean = false): void {
+    if (silent) {
+      // Set flag to suppress exit message in handleExit
+      this.suppressExitMessage = true;
+    }
     if (this.pty) {
       this.pty.kill();
       this.pty = null;

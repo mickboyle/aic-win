@@ -36,16 +36,16 @@ export class ClaudeAdapter implements ToolAdapter {
     
     if (!isSlashCommand) {
       args.push('-p'); // Print mode for regular prompts
+      // Enable tools in print mode (requires permission mode to auto-approve)
+      args.push('--tools', 'default');
+      args.push('--permission-mode', 'acceptEdits');
     }
-    
+
     // Continue previous session if we've already made a call
     const shouldContinue = options?.continueSession !== false && this.hasActiveSession;
     if (shouldContinue) {
       args.push('--continue');
     }
-
-    // Note: Don't use --add-dir here because it takes multiple values and would
-    // consume the prompt as a directory path. The cwd is set when spawning the process.
 
     // Add the prompt as the last argument (only for non-slash commands in print mode)
     if (!isSlashCommand) {

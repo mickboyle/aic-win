@@ -847,8 +847,15 @@ export class SDKSession {
     spinner.start();
 
     try {
+      // Kill any existing PTY for this tool to avoid session conflicts
+      // This ensures /i will start fresh with --continue from the latest session
+      const existingManager = this.ptyManagers.get(this.activeTool);
+      if (existingManager && !existingManager.isDead()) {
+        existingManager.kill(true); // Silent kill - don't show "exited" message
+        this.ptyManagers.delete(this.activeTool);
+      }
+
       // Use adapter's send method (runs in print mode with -p flag)
-      // This is more reliable than the persistent PTY for regular queries
       const adapter = this.registry.get(this.activeTool);
       if (!adapter) {
         throw new Error(`Unknown tool: ${this.activeTool}`);

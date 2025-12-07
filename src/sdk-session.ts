@@ -513,13 +513,15 @@ export class SDKSession {
       `  ${rainbowText('/gemini', 1)}        Switch to Gemini CLI`,
       `  ${rainbowText('/i', 2)}             Enter interactive mode`,
       `  ${rainbowText('/forward', 3)}       Forward response ${colors.dim}[tool] [msg]${colors.reset}`,
+      `  ${rainbowText('/forwardi', 4)}      Forward + interactive ${colors.dim}(or -i flag)${colors.reset}`,
     ];
-    
+
     const commandsRight = [
-      `  ${rainbowText('/history', 4)}       Show conversation`,
-      `  ${rainbowText('/status', 5)}        Show running processes`,
-      `  ${rainbowText('/clear', 0)}         Clear sessions`,
-      `  ${rainbowText('/quit', 1)}          Exit ${colors.dim}(or /cya)${colors.reset}`,
+      `  ${rainbowText('/history', 5)}       Show conversation`,
+      `  ${rainbowText('/status', 0)}        Show running processes`,
+      `  ${rainbowText('/clear', 1)}         Clear sessions`,
+      `  ${rainbowText('/quit', 2)}          Exit ${colors.dim}(or /cya)${colors.reset}`,
+      '',
     ];
     
     // Print commands side by side if terminal is wide enough
@@ -566,7 +568,7 @@ export class SDKSession {
    * Tab completion for / commands
    */
   private completer(line: string): CompleterResult {
-    const commands = ['/claude', '/gemini', '/i', '/forward', '/fwd', '/history', '/status', '/default', '/help', '/clear', '/quit', '/cya'];
+    const commands = ['/claude', '/gemini', '/i', '/forward', '/fwd', '/forwardi', '/fwdi', '/history', '/status', '/default', '/help', '/clear', '/quit', '/cya'];
     
     // Only complete if line starts with /
     if (line.startsWith('/')) {
@@ -718,8 +720,19 @@ export class SDKSession {
         break;
 
       case 'forward':
-      case 'fwd':
-        await this.handleForward(parts.slice(1).join(' '));
+      case 'fwd': {
+        // Check for -i flag for interactive mode
+        const forwardArgs = parts.slice(1);
+        const hasInteractiveFlag = forwardArgs.includes('-i');
+        const argsWithoutFlag = forwardArgs.filter(a => a !== '-i').join(' ');
+        await this.handleForward(argsWithoutFlag, hasInteractiveFlag);
+        break;
+      }
+
+      case 'forwardi':
+      case 'fwdi':
+        // Forward and enter interactive mode
+        await this.handleForward(parts.slice(1).join(' '), true);
         break;
 
       case 'interactive':
@@ -781,6 +794,8 @@ export class SDKSession {
     console.log(`  ${rainbowText('/gemini')}        Switch to Gemini CLI`);
     console.log(`  ${rainbowText('/i')}             Enter interactive mode ${colors.dim}(Ctrl+] or Ctrl+\\ to detach)${colors.reset}`);
     console.log(`  ${rainbowText('/forward')}       Forward last response ${colors.dim}[tool] [msg]${colors.reset}`);
+    console.log(`  ${rainbowText('/forward -i')}    Forward and enter interactive mode`);
+    console.log(`  ${rainbowText('/forwardi')}      Same as /forward -i ${colors.dim}(alias: /fwdi)${colors.reset}`);
     console.log(`  ${rainbowText('/history')}       Show conversation history`);
     console.log(`  ${rainbowText('/status')}        Show running processes`);
     console.log(`  ${rainbowText('/default')}       Set default tool ${colors.dim}<claude|gemini>${colors.reset}`);
@@ -956,6 +971,51 @@ export class SDKSession {
           manager.write(fullCommand[i]);
           i++;
           setTimeout(typeNextChar, 20);
+        }
+      };
+      typeNextChar();
+    }, sendDelay);
+
+    return this.runInteractiveSession(manager, toolName, toolColor);
+  }
+
+  /**
+   * Enter interactive mode and automatically send a prompt
+   * Used for /forwardi to forward a message and stay in interactive mode
+   */
+  private async enterInteractiveModeWithPrompt(prompt: string): Promise<void> {
+    const adapter = this.registry.get(this.activeTool);
+    const toolName = adapter?.displayName || this.activeTool;
+    const toolColor = adapter?.color || colors.white;
+
+    // Check if manager exists BEFORE getting (to detect new spawn vs reattach)
+    const existingManager = this.ptyManagers.get(this.activeTool);
+    const isReattach = existingManager !== undefined && !existingManager.isDead();
+
+    // Get or create the persistent PTY manager (don't wait - user sees startup)
+    const manager = await this.getOrCreateManager(this.activeTool, false);
+
+    // Pause readline
+    this.rl?.pause();
+
+    console.log(`${colors.dim}Sending prompt... Press ${colors.brightYellow}Ctrl+]${colors.dim} or ${colors.brightYellow}Ctrl+\\${colors.dim} to return when done${colors.reset}\n`);
+
+    // Mark as attached
+    manager.attach();
+
+    // For reattach, send quickly. For new process, use adapter's startup delay.
+    const sendDelay = isReattach ? 100 : (adapter?.startupDelay || 2500);
+
+    // Send prompt after appropriate delay, typing char by char for reliability
+    setTimeout(() => {
+      let i = 0;
+      const fullPrompt = prompt + '\r';
+      const typeNextChar = () => {
+        if (i < fullPrompt.length) {
+          manager.write(fullPrompt[i]);
+          i++;
+          // Faster typing for prompts since they can be long
+          setTimeout(typeNextChar, 5);
         }
       };
       typeNextChar();
@@ -1179,7 +1239,7 @@ export class SDKSession {
     console.log('');
   }
 
-  private async handleForward(argsString: string): Promise<void> {
+  private async handleForward(argsString: string, interactive: boolean = false): Promise<void> {
     // Find the last assistant response
     const lastResponse = [...this.conversationHistory]
       .reverse()
@@ -1233,18 +1293,25 @@ export class SDKSession {
 
     console.log('');
     console.log(`${colors.dim}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}`);
-    console.log(`${colors.green}↗${colors.reset} Forwarding from ${sourceColor}${sourceDisplayName}${colors.reset} → ${targetColor}${targetDisplayName}${colors.reset}`);
+    console.log(`${colors.green}↗${colors.reset} Forwarding from ${sourceColor}${sourceDisplayName}${colors.reset} → ${targetColor}${targetDisplayName}${colors.reset}${interactive ? ` ${colors.dim}(interactive)${colors.reset}` : ''}`);
     console.log(`${colors.dim}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}`);
-    console.log(`${targetColor}${targetDisplayName} responds:${colors.reset}`);
 
     // Build forward prompt
     let forwardPrompt = `Another AI assistant (${sourceDisplayName}) provided this response. Please review and share your thoughts:\n\n---\n${lastResponse.content}\n---`;
-    
+
     if (additionalMessage.trim()) {
       forwardPrompt += `\n\nAdditional context: ${additionalMessage.trim()}`;
     }
 
-    await this.sendToTool(forwardPrompt);
+    if (interactive) {
+      // Forward via interactive mode - user can respond to prompts
+      console.log(`${targetColor}${targetDisplayName} responds:${colors.reset}`);
+      await this.enterInteractiveModeWithPrompt(forwardPrompt);
+    } else {
+      // Standard forward - fire and forget
+      console.log(`${targetColor}${targetDisplayName} responds:${colors.reset}`);
+      await this.sendToTool(forwardPrompt);
+    }
   }
 
   private showHistory(): void {

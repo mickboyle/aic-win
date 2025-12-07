@@ -83,6 +83,8 @@ That's it! This launches the interactive session.
 | `/forward` | Forward last response to other tool (auto-selects if 2 tools) |
 | `/forward [tool]` | Forward to specific tool (required if 3+ tools) |
 | `/forward [tool] [msg]` | Forward with additional context |
+| `/forward -i [tool]` | Forward and stay in interactive mode |
+| `/forwardi [tool]` | Same as `/forward -i` (alias: `/fwdi`) |
 | `/history` | Show conversation history |
 | `/status` | Show running processes |
 | `/clear` | Clear sessions and history |
@@ -160,6 +162,28 @@ Use /i to re-attach
 > **Tip:** Use `//status` or `//cost` to quickly run tool commands—AIC will enter interactive mode, run the command, and you press `Ctrl+]` when done.
 
 > **Note:** Messages exchanged while in interactive mode (after `/i`) are not captured for forwarding. Use regular mode for conversations you want to forward between tools.
+
+### Interactive Forwarding
+
+When forwarding a message that might trigger permissions or require interaction (e.g., code edits, file changes), use `/forwardi` or `/forward -i` to stay in interactive mode:
+
+```bash
+❯ claude → /forwardi gemini
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+↗ Forwarding from Claude Code → Gemini CLI (interactive)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Gemini CLI responds:
+
+> I'll implement those changes. Allow me to edit src/api.ts? [y/n]: y
+> (you can respond to prompts)
+> (press Ctrl+] when done to return to aic)
+```
+
+This is useful when:
+- The AI might request permission to modify files
+- You need to approve or deny actions
+- The response requires multi-turn interaction
 
 ### Session Persistence
 

@@ -25,6 +25,8 @@ Session Commands:
   /gemini               Switch to Gemini CLI
   /i                    Enter interactive mode (Ctrl+] to detach)
   /forward [tool] [msg] Forward last response to another tool
+  /forward -i [tool]    Forward and enter interactive mode
+  /forwardi [tool]      Same as /forward -i (alias: /fwdi)
   /history              Show conversation history
   /status               Show running processes
   /default <tool>       Set default tool (saved permanently)
@@ -41,6 +43,7 @@ Configuration:
 Forward Behavior:
   With 2 tools:  /forward            Auto-selects the other tool
   With 3+ tools: /forward <tool>     Target tool required
+  Use -i flag:   /forward -i         Enter interactive mode after forwarding
 
 Examples:
   aic                         Launch interactive session

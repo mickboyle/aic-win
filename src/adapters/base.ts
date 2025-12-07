@@ -22,24 +22,36 @@ export interface ToolAdapter {
   /** ANSI color code for the tool (e.g., '\x1b[96m' for bright cyan) */
   readonly color: string;
 
+  /** Regex pattern to detect when tool is showing its input prompt (ready for input) */
+  readonly promptPattern: RegExp;
+
+  /** Fallback timeout in ms - if no output for this long, assume response complete */
+  readonly idleTimeout: number;
+
   /** Check if the tool is installed and available */
   isAvailable(): Promise<boolean>;
-  
+
   /** Send a prompt to the tool and get a response */
   send(prompt: string, options?: SendOptions): Promise<string>;
-  
+
   /** Reset conversation context */
   resetContext(): void;
-  
+
   /** Get the command that would be executed (for debugging) */
   getCommand(prompt: string, options?: SendOptions): string[];
 
   /** Get the command to start an interactive session */
   getInteractiveCommand(options?: SendOptions): string[];
 
+  /** Get arguments for starting a persistent PTY session */
+  getPersistentArgs(): string[];
+
+  /** Clean response output - remove UI noise like spinners, prompts, status lines */
+  cleanResponse(rawOutput: string): string;
+
   /** Check if there's an active session with this tool */
   hasSession(): boolean;
-  
+
   /** Set whether there's an active session (for persistence) */
   setHasSession(value: boolean): void;
 }

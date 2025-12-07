@@ -1,5 +1,5 @@
 import { ToolAdapter, SendOptions } from './base.js';
-import { runCommandPty, commandExists, stripAnsi } from '../utils.js';
+import { runCommand, commandExists, stripAnsi } from '../utils.js';
 
 /**
  * Adapter for Gemini CLI
@@ -15,6 +15,12 @@ export class GeminiAdapter implements ToolAdapter {
   readonly displayName = 'Gemini CLI';
   readonly color = '\x1b[95m'; // brightMagenta
 
+  // Gemini shows > at start of line when ready for input
+  readonly promptPattern = /^>\s*$/m;
+
+  // Fallback: if no output for 1.5 seconds, assume response complete
+  readonly idleTimeout = 1500;
+
   private hasActiveSession = false;
   
   async isAvailable(): Promise<boolean> {
@@ -29,11 +35,10 @@ export class GeminiAdapter implements ToolAdapter {
     if (shouldContinue) {
       args.push('--resume', 'latest');
     }
-    
-    if (options?.cwd) {
-      args.push('--include-directories', options.cwd);
-    }
-    
+
+    // Note: Don't use --include-directories here because it takes an array and would
+    // consume the prompt. The cwd is set when spawning the process.
+
     // Add the prompt as the last argument (positional)
     args.push(prompt);
     
@@ -49,25 +54,57 @@ export class GeminiAdapter implements ToolAdapter {
     return ['gemini', ...args];
   }
 
-  async send(prompt: string, options?: SendOptions): Promise<string> {
-    const args = this.getCommand(prompt, options).slice(1); // Remove 'gemini' from start
-    
-    console.log(''); // Add newline before output
-    
-    const result = await runCommandPty('gemini', args, {
-      cwd: options?.cwd || process.cwd(),
-      keepStdinOpen: options?.keepStdinOpen,
-    });
-    
-    if (result.exitCode !== 0) {
-      throw new Error(`Gemini CLI exited with code ${result.exitCode}`);
+  getPersistentArgs(): string[] {
+    // Resume previous session if we have one from regular mode
+    if (this.hasActiveSession) {
+      return ['--resume', 'latest'];
     }
-    
+    return [];
+  }
+
+  cleanResponse(rawOutput: string): string {
+    let output = rawOutput;
+
+    // Remove "Loaded cached credentials." line
+    output = output.replace(/Loaded cached credentials\.?\s*/g, '');
+
+    // Remove spinner frames
+    output = output.replace(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/g, '');
+
+    // Remove the prompt line itself
+    output = output.replace(/^>\s*$/gm, '');
+
+    // Remove cursor movement and line clearing escape sequences
+    output = output.replace(/\x1b\[\d*[ABCDEFGJKST]/g, '');
+    output = output.replace(/\x1b\[\d*;\d*[Hf]/g, '');
+    output = output.replace(/\x1b\[[\d;]*m/g, ''); // Color codes
+    output = output.replace(/\x1b\[\??\d+[hl]/g, ''); // Mode changes
+    output = output.replace(/\x1b\[\d* ?q/g, ''); // Cursor style
+
+    // Clean up excessive whitespace
+    output = output.replace(/\n{3,}/g, '\n\n');
+
+    return output.trim();
+  }
+
+  async send(prompt: string, options?: SendOptions): Promise<string> {
+    // Use non-interactive runCommand to avoid messing with stdin
+    const args = this.getCommand(prompt, options).slice(1); // Remove 'gemini' from start
+
+    const result = await runCommand('gemini', args, {
+      cwd: options?.cwd || process.cwd(),
+    });
+
+    if (result.exitCode !== 0) {
+      const errorMsg = result.stderr.trim() || result.stdout.trim() || 'Unknown error';
+      throw new Error(`Gemini CLI exited with code ${result.exitCode}: ${errorMsg}`);
+    }
+
     // Mark that we now have an active session
     this.hasActiveSession = true;
-    
-    // Return the captured output (strip ANSI for storage, but it was displayed with colors)
-    return stripAnsi(result.output).trim();
+
+    // Return stdout
+    return result.stdout.trim();
   }
   
   resetContext(): void {

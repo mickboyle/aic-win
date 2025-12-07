@@ -1,5 +1,5 @@
 import { ToolAdapter, SendOptions } from './base.js';
-import { runCommandPty, commandExists, stripAnsi } from '../utils.js';
+import { runCommand, commandExists, stripAnsi } from '../utils.js';
 
 /**
  * Adapter for Claude Code CLI
@@ -13,6 +13,14 @@ export class ClaudeAdapter implements ToolAdapter {
   readonly name = 'claude';
   readonly displayName = 'Claude Code';
   readonly color = '\x1b[96m'; // brightCyan
+
+  // Claude shows ❯ character when ready for input (with possible trailing chars like tool name)
+  // Match: ❯ followed by optional text and arrow or end of string/line
+  readonly promptPattern = /❯\s*(\w*\s*→)?.*$/m;
+
+  // Fallback: if no output for 3 seconds, assume response complete
+  // Claude Code can have brief pauses between output chunks during response generation
+  readonly idleTimeout = 3000;
 
   private hasActiveSession = false;
   
@@ -35,11 +43,10 @@ export class ClaudeAdapter implements ToolAdapter {
     if (shouldContinue) {
       args.push('--continue');
     }
-    
-    if (options?.cwd) {
-      args.push('--add-dir', options.cwd);
-    }
-    
+
+    // Note: Don't use --add-dir here because it takes multiple values and would
+    // consume the prompt as a directory path. The cwd is set when spawning the process.
+
     // Add the prompt as the last argument (only for non-slash commands in print mode)
     if (!isSlashCommand) {
       args.push(prompt);
@@ -57,28 +64,58 @@ export class ClaudeAdapter implements ToolAdapter {
     return ['claude', ...args];
   }
 
-  async send(prompt: string, options?: SendOptions): Promise<string> {
-    const isSlashCommand = prompt.startsWith('/');
-    const args = this.getCommand(prompt, options).slice(1); // Remove 'claude' from start
-    
-    console.log(''); // Add newline before output
-    
-    const result = await runCommandPty('claude', args, {
-      cwd: options?.cwd || process.cwd(),
-      keepStdinOpen: options?.keepStdinOpen,
-      // For slash commands, we'll write the command after Claude starts
-      initialInput: isSlashCommand ? prompt + '\n' : undefined,
-    });
-    
-    if (result.exitCode !== 0 && !isSlashCommand) {
-      throw new Error(`Claude Code exited with code ${result.exitCode}`);
+  getPersistentArgs(): string[] {
+    // Continue previous session if we have one from regular mode
+    if (this.hasActiveSession) {
+      return ['--continue'];
     }
-    
+    return [];
+  }
+
+  cleanResponse(rawOutput: string): string {
+    let output = rawOutput;
+
+    // Remove spinner frames
+    output = output.replace(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/g, '');
+
+    // Remove common status line patterns (e.g., "Reading file...", "Thinking...")
+    output = output.replace(/^(Reading|Writing|Analyzing|Thinking|Searching|Running).*$/gm, '');
+
+    // Remove the prompt line itself (❯ followed by tool name → )
+    output = output.replace(/❯\s*[a-z]+\s*→.*$/gm, '');
+    output = output.replace(/❯\s*$/gm, '');
+
+    // Remove cursor movement and line clearing escape sequences
+    output = output.replace(/\x1b\[\d*[ABCDEFGJKST]/g, '');
+    output = output.replace(/\x1b\[\d*;\d*[Hf]/g, '');
+    output = output.replace(/\x1b\[[\d;]*m/g, ''); // Color codes
+    output = output.replace(/\x1b\[\??\d+[hl]/g, ''); // Mode changes
+    output = output.replace(/\x1b\[\d* ?q/g, ''); // Cursor style
+
+    // Clean up excessive whitespace
+    output = output.replace(/\n{3,}/g, '\n\n');
+
+    return output.trim();
+  }
+
+  async send(prompt: string, options?: SendOptions): Promise<string> {
+    // For print mode (-p), use non-interactive runCommand to avoid messing with stdin
+    const args = this.getCommand(prompt, options).slice(1); // Remove 'claude' from start
+
+    const result = await runCommand('claude', args, {
+      cwd: options?.cwd || process.cwd(),
+    });
+
+    if (result.exitCode !== 0) {
+      const errorMsg = result.stderr.trim() || result.stdout.trim() || 'Unknown error';
+      throw new Error(`Claude Code exited with code ${result.exitCode}: ${errorMsg}`);
+    }
+
     // Mark that we now have an active session
     this.hasActiveSession = true;
-    
-    // Return the captured output (strip ANSI for storage, but it was displayed with colors)
-    return stripAnsi(result.output).trim();
+
+    // Return stdout (already plain text in print mode)
+    return result.stdout.trim();
   }
   
   resetContext(): void {

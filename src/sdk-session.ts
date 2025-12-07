@@ -1,13 +1,12 @@
 import { execSync } from 'child_process';
 import { createInterface, Interface, CompleterResult } from 'readline';
-import * as pty from 'node-pty';
-import { IPty } from 'node-pty';
 import { marked } from 'marked';
 import TerminalRenderer from 'marked-terminal';
 import { stripAnsi } from './utils.js';
 import { getDefaultTool, setDefaultTool } from './config.js';
 import { VERSION } from './version.js';
 import { AdapterRegistry } from './adapters/base.js';
+import { PersistentPtyManager, PtyState, PtyConfig } from './persistent-pty.js';
 
 /**
  * Get the version of a CLI tool
@@ -372,15 +371,8 @@ export class SDKSession {
   // Adapter registry for tool lookup
   private registry: AdapterRegistry;
 
-  // Session tracking (for print mode)
-  private claudeHasSession = false;
-  private geminiHasSession = false;
-
-  // Persistent PTY processes for interactive mode
-  private runningProcesses: Map<string, IPty> = new Map();
-
-  // Buffer to capture interactive mode output for forwarding
-  private interactiveOutputBuffer: Map<string, string> = new Map();
+  // Persistent PTY managers - one per tool, lazy-spawned on first use
+  private ptyManagers: Map<string, PersistentPtyManager> = new Map();
 
   // Working directory
   private cwd: string;
@@ -397,6 +389,50 @@ export class SDKSession {
     this.cwd = cwd || process.cwd();
     // Load default tool from config (or env var)
     this.activeTool = getDefaultTool() as 'claude' | 'gemini';
+  }
+
+  /**
+   * Get or create a PersistentPtyManager for a tool.
+   * Lazy-spawns the PTY on first use.
+   * @param tool The tool name
+   * @param waitForReady If false, returns immediately after spawning (for interactive mode)
+   */
+  private async getOrCreateManager(tool: string, waitForReady: boolean = true): Promise<PersistentPtyManager> {
+    let manager = this.ptyManagers.get(tool);
+
+    if (!manager || manager.isDead()) {
+      const adapter = this.registry.get(tool);
+      if (!adapter) {
+        throw new Error(`Unknown tool: ${tool}`);
+      }
+
+      manager = new PersistentPtyManager({
+        name: adapter.name,
+        command: adapter.name,
+        args: adapter.getPersistentArgs(),
+        promptPattern: adapter.promptPattern,
+        idleTimeout: adapter.idleTimeout,
+        cleanResponse: (raw) => adapter.cleanResponse(raw),
+        color: adapter.color,
+        displayName: adapter.displayName,
+      });
+
+      manager.setCallbacks({
+        onExit: (exitCode) => {
+          console.log(`\n${colors.dim}${adapter.displayName} exited (code ${exitCode})${colors.reset}`);
+        },
+        onStateChange: (state) => {
+          // Could add state change handling here if needed
+        },
+      });
+
+      this.ptyManagers.set(tool, manager);
+
+      // Spawn the PTY (optionally wait for ready)
+      await manager.spawn(this.cwd, waitForReady);
+    }
+
+    return manager;
   }
 
   async start(): Promise<void> {
@@ -719,8 +755,6 @@ export class SDKSession {
 
       case 'clear':
         await this.cleanup();
-        this.claudeHasSession = false;
-        this.geminiHasSession = false;
         this.conversationHistory = [];
         console.log('Sessions and history cleared.');
         break;
@@ -804,14 +838,37 @@ export class SDKSession {
       this.conversationHistory.shift();
     }
 
-    try {
-      let response: string;
+    const adapter = this.registry.get(this.activeTool);
+    const toolColor = adapter?.color || colors.white;
+    const toolName = adapter?.displayName || this.activeTool;
 
-      if (this.activeTool === 'claude') {
-        response = await this.sendToClaude(message);
-      } else {
-        response = await this.sendToGemini(message);
+    // Start spinner
+    const spinner = new Spinner(`${toolColor}${toolName}${colors.reset} is thinking`);
+    spinner.start();
+
+    try {
+      // Use adapter's send method (runs in print mode with -p flag)
+      // This is more reliable than the persistent PTY for regular queries
+      const adapter = this.registry.get(this.activeTool);
+      if (!adapter) {
+        throw new Error(`Unknown tool: ${this.activeTool}`);
       }
+
+      const response = await adapter.send(message, {
+        cwd: this.cwd,
+        continueSession: true,
+        timeout: REQUEST_TIMEOUT_MS,
+      });
+
+      spinner.stop();
+
+      // Render the response
+      console.log('');
+      if (response) {
+        const rendered = marked.parse(response) as string;
+        process.stdout.write(rendered);
+      }
+      console.log('');
 
       // Record assistant response
       this.conversationHistory.push({
@@ -825,6 +882,7 @@ export class SDKSession {
         this.conversationHistory.shift();
       }
     } catch (error) {
+      spinner.stop();
       const errorMessage = error instanceof Error ? error.message : String(error);
       console.error(`\n${colors.red}Error:${colors.reset} ${errorMessage}\n`);
 
@@ -835,583 +893,94 @@ export class SDKSession {
     }
   }
 
-  private sendToClaude(message: string): Promise<string> {
-    return new Promise((resolve, reject) => {
-      // Start spinner
-      const spinner = new Spinner(`${colors.brightCyan}Claude${colors.reset} is thinking`);
-      spinner.start();
-
-      // Use print mode (-p) for non-interactive message sending
-      // This won't hijack existing sessions
-      const args: string[] = ['-p', message];
-
-      // Continue aic's own session if we have one
-      if (this.claudeHasSession) {
-        args.push('--continue');
-      }
-
-      // Use PTY to capture streaming output with status updates
-      const ptyProc = pty.spawn('claude', args, {
-        name: 'xterm-256color',
-        cols: process.stdout.columns || 80,
-        rows: process.stdout.rows || 24,
-        cwd: this.cwd,
-        env: process.env as { [key: string]: string },
-      });
-
-      let outputBuffer = '';
-      let finished = false;
-      let outputHandler: { dispose: () => void } | null = null;
-      let timeoutHandle: NodeJS.Timeout | null = null;
-
-      // Consolidated cleanup function - prevents double cleanup
-      const cleanup = () => {
-        if (timeoutHandle) {
-          clearTimeout(timeoutHandle);
-          timeoutHandle = null;
-        }
-        if (outputHandler) {
-          outputHandler.dispose();
-          outputHandler = null;
-        }
-        spinner.stop();
-        try {
-          ptyProc.kill();
-        } catch {
-          // Process already dead
-        }
-      };
-
-      // Handle PTY output
-      outputHandler = ptyProc.onData((data: string) => {
-        outputBuffer += data;
-        spinner.setStatus(data);
-      });
-
-      // Handle process exit
-      ptyProc.onExit(({ exitCode }) => {
-        if (finished) return;
-        finished = true;
-        cleanup();
-
-        const response = stripAnsi(outputBuffer).trim();
-
-        if (exitCode === 0) {
-          // Render the response
-          console.log('');
-          if (response) {
-            const rendered = marked.parse(response) as string;
-            process.stdout.write(rendered);
-          }
-          console.log('');
-          this.claudeHasSession = true;
-          resolve(response);
-        } else {
-          // Non-zero exit might mean Claude needs interaction
-          console.log('');
-          console.log(`${colors.yellow}⚠ Claude may need your input.${colors.reset} Use ${colors.brightYellow}/i${colors.reset} to interact.`);
-          console.log('');
-          this.claudeHasSession = true;
-          resolve(response);
-        }
-      });
-
-      // Timeout fallback - reject instead of silent resolve
-      timeoutHandle = setTimeout(() => {
-        if (finished) return;
-        finished = true;
-        cleanup();
-        reject(new Error(`Request timeout after ${REQUEST_TIMEOUT_MS / 1000} seconds. Use /i to check session.`));
-      }, REQUEST_TIMEOUT_MS);
-    });
-  }
-
-  private sendToGemini(message: string): Promise<string> {
-    return new Promise((resolve, reject) => {
-      // Start spinner
-      const spinner = new Spinner(`${colors.brightMagenta}Gemini${colors.reset} is thinking`);
-      spinner.start();
-
-      // Use positional prompt for non-interactive mode
-      // This won't hijack existing sessions
-      const args: string[] = [message];
-
-      // Resume aic's own session if we have one
-      if (this.geminiHasSession) {
-        args.push('--resume', 'latest');
-      }
-
-      // Use PTY to capture streaming output with status updates
-      const ptyProc = pty.spawn('gemini', args, {
-        name: 'xterm-256color',
-        cols: process.stdout.columns || 80,
-        rows: process.stdout.rows || 24,
-        cwd: this.cwd,
-        env: process.env as { [key: string]: string },
-      });
-
-      let outputBuffer = '';
-      let finished = false;
-      let outputHandler: { dispose: () => void } | null = null;
-      let timeoutHandle: NodeJS.Timeout | null = null;
-
-      const cleanGeminiOutput = (output: string): string => {
-        // Remove "Loaded cached credentials." line and clean up
-        return stripAnsi(output)
-          .split('\n')
-          .filter(line => !line.includes('Loaded cached credentials'))
-          .join('\n')
-          .trim();
-      };
-
-      // Consolidated cleanup function - prevents double cleanup
-      const cleanup = () => {
-        if (timeoutHandle) {
-          clearTimeout(timeoutHandle);
-          timeoutHandle = null;
-        }
-        if (outputHandler) {
-          outputHandler.dispose();
-          outputHandler = null;
-        }
-        spinner.stop();
-        try {
-          ptyProc.kill();
-        } catch {
-          // Process already dead
-        }
-      };
-
-      // Handle PTY output
-      outputHandler = ptyProc.onData((data: string) => {
-        outputBuffer += data;
-        spinner.setStatus(data);
-      });
-
-      // Handle process exit
-      ptyProc.onExit(({ exitCode }) => {
-        if (finished) return;
-        finished = true;
-        cleanup();
-
-        const response = cleanGeminiOutput(outputBuffer);
-
-        if (exitCode === 0) {
-          // Render the response
-          console.log('');
-          if (response) {
-            const rendered = marked.parse(response) as string;
-            process.stdout.write(rendered);
-          }
-          console.log('');
-          this.geminiHasSession = true;
-          resolve(response);
-        } else {
-          // Non-zero exit might mean Gemini needs interaction
-          console.log('');
-          console.log(`${colors.yellow}⚠ Gemini may need your input.${colors.reset} Use ${colors.brightYellow}/i${colors.reset} to interact.`);
-          console.log('');
-          this.geminiHasSession = true;
-          resolve(response);
-        }
-      });
-
-      // Timeout fallback - reject instead of silent resolve
-      timeoutHandle = setTimeout(() => {
-        if (finished) return;
-        finished = true;
-        cleanup();
-        reject(new Error(`Request timeout after ${REQUEST_TIMEOUT_MS / 1000} seconds. Use /i to check session.`));
-      }, REQUEST_TIMEOUT_MS);
-    });
-  }
-
   /**
    * Enter full interactive mode with the active tool.
-   * - If a process is already running, re-attach to it
-   * - If not, spawn a new one
-   * - Press Ctrl+] to detach (process keeps running)
-   * - Use /exit in the tool to terminate the process
+   * Uses the unified PersistentPtyManager for session continuity.
+   * Press Ctrl+] to detach (PTY keeps running)
    */
   private async enterInteractiveMode(): Promise<void> {
-    // Get adapter for active tool
     const adapter = this.registry.get(this.activeTool);
     const toolName = adapter?.displayName || this.activeTool;
     const toolColor = adapter?.color || colors.white;
 
-    // Check if we already have a running process
-    let ptyProcess = this.runningProcesses.get(this.activeTool);
-    const isReattach = ptyProcess !== undefined;
+    // Get or create the persistent PTY manager (don't wait for ready - user sees startup)
+    const manager = await this.getOrCreateManager(this.activeTool, false);
+    const isReattach = manager.isUserAttached() === false && manager.getState() !== PtyState.DEAD;
 
     // Pause readline to prevent interference with raw input
     this.rl?.pause();
 
-    if (isReattach) {
-      console.log(`\n${colors.green}↩${colors.reset} Re-attaching to ${toolColor}${toolName}${colors.reset}...`);
-    } else {
-      console.log(`\n${colors.green}▶${colors.reset} Starting ${toolColor}${toolName}${colors.reset} interactive mode...`);
+    // Show rainbow "Entering Interactive Mode" message
+    await animateRainbow(`Entering Interactive Mode for ${toolName}...`, 500);
+    process.stdout.write('\n');
+
+    if (isReattach && manager.getOutputBuffer().length > 0) {
+      console.log(`${colors.green}↩${colors.reset} Re-attaching to ${toolColor}${toolName}${colors.reset}...`);
+      // Replay buffer to restore screen state
+      process.stdout.write('\x1b[2J\x1b[H'); // Clear screen
+      const buffer = manager.getOutputBuffer();
+      const filteredBuffer = buffer.split(FOCUS_IN_SEQ).join('').split(FOCUS_OUT_SEQ).join('');
+      process.stdout.write(filteredBuffer);
     }
-    console.log(`${colors.dim}Press ${colors.brightYellow}Ctrl+]${colors.dim} or ${colors.brightYellow}Ctrl+\\${colors.dim} to detach • ${colors.white}/exit${colors.dim} to terminate${colors.reset}\n`);
+    console.log(`${colors.dim}Press ${colors.brightYellow}Ctrl+]${colors.dim} or ${colors.brightYellow}Ctrl+\\${colors.dim} to detach${colors.reset}\n`);
 
-    // Clear the output buffer for fresh capture
-    this.interactiveOutputBuffer.set(this.activeTool, '');
+    // Mark as attached - output will now flow to stdout
+    manager.attach();
 
-    // Interactive mode takes over stdin
-
-    return new Promise((resolve) => {
-      // Spawn new process if needed
-      if (!ptyProcess) {
-        // Get command from adapter (handles --continue/--resume flags)
-        const hasSession = this.activeTool === 'claude' ? this.claudeHasSession : this.geminiHasSession;
-        const [command, ...args] = adapter?.getInteractiveCommand({ continueSession: hasSession }) || [this.activeTool];
-
-        ptyProcess = pty.spawn(command, args, {
-          name: 'xterm-256color',
-          cols: process.stdout.columns || 80,
-          rows: process.stdout.rows || 24,
-          cwd: this.cwd,
-          env: process.env as { [key: string]: string },
-        });
-
-        // Store the process
-        this.runningProcesses.set(this.activeTool, ptyProcess);
-
-        // Handle process exit (user typed /exit in the tool)
-        ptyProcess.onExit(({ exitCode }) => {
-          console.log(`\n${colors.dim}${toolName} exited (code ${exitCode})${colors.reset}`);
-          this.runningProcesses.delete(this.activeTool);
-          
-          // Mark session as having history
-          if (this.activeTool === 'claude') {
-            this.claudeHasSession = true;
-          } else {
-            this.geminiHasSession = true;
-          }
-        });
-      }
-
-      // Handle resize
-      const onResize = () => {
-        ptyProcess!.resize(
-          process.stdout.columns || 80,
-          process.stdout.rows || 24
-        );
-      };
-      process.stdout.on('resize', onResize);
-
-      // Pipe PTY output to terminal AND capture for forwarding
-      const outputDisposable = ptyProcess.onData((data) => {
-        // Filter out terminal response sequences (DA responses, etc.)
-        // These can cause garbage like "0u64;1;2;4;6;..." to appear
-        let filteredData = data;
-        
-        // Filter focus sequences from output too
-        filteredData = filteredData.split(FOCUS_IN_SEQ).join('').split(FOCUS_OUT_SEQ).join('');
-        
-        if (filteredData.length > 0) {
-          process.stdout.write(filteredData);
-        }
-        // Capture output for potential forwarding
-        const current = this.interactiveOutputBuffer.get(this.activeTool) || '';
-        this.interactiveOutputBuffer.set(this.activeTool, current + data);
-      });
-
-      // Set up stdin forwarding with detach key detection
-      if (process.stdin.isTTY) {
-        process.stdin.setRawMode(true);
-      }
-      process.stdin.resume();
-
-      let detached = false;
-      let lastEscapeTime = 0;
-
-      // Debug mode - set AIC_DEBUG=1 to see key codes
-      const debugKeys = process.env.AIC_DEBUG === '1';
-
-      // Define onStdinData first so it can be referenced in performDetach
-      let onStdinData: ((data: Buffer) => void) | null = null;
-
-      const performDetach = () => {
-        if (detached) return;
-        detached = true;
-
-        // CRITICAL: Remove stdin listener IMMEDIATELY to prevent race conditions
-        // This must happen before any other cleanup to prevent re-entry
-        if (onStdinData) {
-          process.stdin.removeListener('data', onStdinData);
-        }
-
-        cleanup();
-
-        // Clear the interactive output buffer (don't save to history - it's UI noise)
-        this.interactiveOutputBuffer.set(this.activeTool, '');
-
-        // Clear any pending terminal responses before showing detach message
-        process.stdout.write('\x1b[2K\r'); // Clear current line
-        console.log(`\n\n${colors.yellow}⏸${colors.reset} Detached from ${toolColor}${toolName}${colors.reset} ${colors.dim}(still running)${colors.reset}`);
-        console.log(`${colors.dim}Use ${colors.brightYellow}/i${colors.dim} to re-attach${colors.reset}`);
-        console.log(`${colors.dim}Press ${colors.brightYellow}Enter${colors.dim} to continue${colors.reset}\n`);
-        resolve();
-      };
-
-      onStdinData = (data: Buffer) => {
-        let str = data.toString();
-        
-        // Debug output to see what keys are being received
-        if (debugKeys) {
-          const hexBytes = Array.from(data).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' ');
-          console.log(`\n[DEBUG] Received ${data.length} bytes: ${hexBytes}`);
-        }
-        
-        // Filter out terminal focus reporting sequences (sent when window gains/loses focus)
-        // These cause ^[[I and ^[[O to appear in the terminal
-        if (str === FOCUS_IN_SEQ || str === FOCUS_OUT_SEQ) {
-          if (debugKeys) console.log('[DEBUG] Filtered focus event');
-          return; // Don't forward to PTY
-        }
-        
-        // Also filter if focus sequences are embedded in the data
-        str = str.split(FOCUS_IN_SEQ).join('').split(FOCUS_OUT_SEQ).join('');
-        if (str.length === 0) {
-          return; // Nothing left after filtering
-        }
-        
-        // Check for CSI u sequences (modern keyboard protocol used by iTerm2)
-        for (const seq of CSI_U_DETACH_SEQS) {
-          if (str === seq || str.includes(seq)) {
-            if (debugKeys) console.log(`[DEBUG] Detected CSI u detach sequence: ${seq.replace('\x1b', 'ESC')}`);
-            performDetach();
-            return;
-          }
-        }
-        
-        // Check for detach keys by examining raw bytes (traditional terminals)
-        // This is more reliable than string comparison for control characters
-        for (let i = 0; i < data.length; i++) {
-          const byte = data[i];
-          
-          // Ctrl+] (0x1D = 29) - primary detach key
-          if (byte === DETACH_KEYS.CTRL_BRACKET) {
-            if (debugKeys) console.log('[DEBUG] Detected Ctrl+]');
-            performDetach();
-            return;
-          }
-          
-          // Ctrl+\ (0x1C = 28) - alternative detach key
-          if (byte === DETACH_KEYS.CTRL_BACKSLASH) {
-            if (debugKeys) console.log('[DEBUG] Detected Ctrl+\\');
-            performDetach();
-            return;
-          }
-          
-          // Ctrl+^ (0x1E = 30) - another alternative (Ctrl+Shift+6)
-          if (byte === DETACH_KEYS.CTRL_CARET) {
-            if (debugKeys) console.log('[DEBUG] Detected Ctrl+^');
-            performDetach();
-            return;
-          }
-          
-          // Ctrl+_ (0x1F = 31) - another alternative (Ctrl+Shift+-)
-          if (byte === DETACH_KEYS.CTRL_UNDERSCORE) {
-            if (debugKeys) console.log('[DEBUG] Detected Ctrl+_');
-            performDetach();
-            return;
-          }
-        }
-        
-        // Handle escape sequences for double-escape detection
-        // Check for immediate double escape (0x1B 0x1B) anywhere in buffer
-        if (data.length >= 2) {
-          for (let i = 0; i < data.length - 1; i++) {
-            if (data[i] === DETACH_KEYS.ESCAPE && data[i + 1] === DETACH_KEYS.ESCAPE) {
-              if (debugKeys) console.log('[DEBUG] Detected double-Escape');
-              performDetach();
-              return;
-            }
-          }
-        }
-
-        // Single Escape (0x1B) - track for double-escape detection
-        const isSingleEscape = data.length === 1 && data[0] === DETACH_KEYS.ESCAPE;
-        if (isSingleEscape) {
-          const now = Date.now();
-          if (now - lastEscapeTime < 500) {
-            // Double escape detected - detach!
-            if (debugKeys) console.log('[DEBUG] Detected double-Escape (timed)');
-            performDetach();
-            return;
-          }
-          lastEscapeTime = now;
-          // Still forward the escape to the PTY
-          ptyProcess!.write(str);
-          return;
-        }
-        
-        // Reset escape timer if not an escape key
-        if (!isSingleEscape) {
-          lastEscapeTime = 0;
-        }
-        
-        // Forward filtered data to PTY
-        ptyProcess!.write(str);
-      };
-      process.stdin.on('data', onStdinData);
-
-      // Handle process exit while attached
-      const exitHandler = () => {
-        if (!detached) {
-          cleanup();
-          console.log(`\n${colors.dim}Returned to ${colors.brightYellow}aic${colors.reset}\n`);
-          resolve();
-        }
-      };
-      ptyProcess.onExit(exitHandler);
-
-      // Cleanup function
-      let cleanedUp = false;
-      const cleanup = () => {
-        if (cleanedUp) return;
-        cleanedUp = true;
-
-        process.stdin.removeListener('data', onStdinData);
-        process.stdout.removeListener('resize', onResize);
-        outputDisposable.dispose();
-        
-        // Clear the current line
-        process.stdout.write('\x1b[2K\r');
-        
-        // CRITICAL FIX: Explicitly disable terminal features that cause garbage
-        process.stdout.write('\x1b[?1004l'); // Disable focus reporting (stops ^[[I / ^[[O)
-        process.stdout.write('\x1b[?2004l'); // Disable bracketed paste
-        process.stdout.write('\x1b[>0u');    // Reset keyboard enhancement to legacy mode (CSI u)
-        process.stdout.write('\x1b[?25h');   // Ensure cursor is visible
-
-        if (process.stdin.isTTY) {
-          process.stdin.setRawMode(false);
-        }
-
-        // Recreate readline to ensure clean state after PTY interaction
-        this.rl?.close();
-        this.setupReadline();
-
-        // Clear any garbage after a brief delay
-        setTimeout(() => {
-          process.stdout.write('\x1b[2K\r');
-        }, 100);
-      };
-    });
+    return this.runInteractiveSession(manager, toolName, toolColor);
   }
 
   /**
    * Enter interactive mode and automatically send a slash command
-   * User stays in interactive mode to see output and interact, then Ctrl+] to return
    */
   private async enterInteractiveModeWithCommand(slashCommand: string): Promise<void> {
-    // Get adapter for active tool
     const adapter = this.registry.get(this.activeTool);
     const toolName = adapter?.displayName || this.activeTool;
     const toolColor = adapter?.color || colors.white;
 
-    // Check if we already have a running process
-    let ptyProcess = this.runningProcesses.get(this.activeTool);
-    const isReattach = ptyProcess !== undefined;
+    // Get or create the persistent PTY manager (don't wait for ready)
+    const manager = await this.getOrCreateManager(this.activeTool, false);
 
-    // Pause readline to prevent interference with raw input
+    // Pause readline
     this.rl?.pause();
 
     console.log(`${colors.dim}Sending ${colors.brightYellow}${slashCommand}${colors.dim}... Press ${colors.brightYellow}Ctrl+]${colors.dim} or ${colors.brightYellow}Ctrl+\\${colors.dim} to return${colors.reset}\n`);
 
-    // Clear the output buffer for fresh capture
-    this.interactiveOutputBuffer.set(this.activeTool, '');
+    // Mark as attached
+    manager.attach();
+
+    // Send the command after a short delay to let the tool initialize
+    setTimeout(() => {
+      manager.write(slashCommand + '\n');
+    }, 500);
+
+    return this.runInteractiveSession(manager, toolName, toolColor);
+  }
+
+  /**
+   * Common interactive session logic - handles stdin forwarding and detach keys
+   */
+  private runInteractiveSession(
+    manager: PersistentPtyManager,
+    toolName: string,
+    toolColor: string
+  ): Promise<void> {
+    const pty = manager.getPty();
+    if (!pty) {
+      return Promise.reject(new Error('PTY not available'));
+    }
 
     return new Promise((resolve) => {
-      // Spawn new process if needed
-      if (!ptyProcess) {
-        // Get command from adapter (handles --continue/--resume flags)
-        const hasSession = this.activeTool === 'claude' ? this.claudeHasSession : this.geminiHasSession;
-        const [cmd, ...args] = adapter?.getInteractiveCommand({ continueSession: hasSession }) || [this.activeTool];
-
-        ptyProcess = pty.spawn(cmd, args, {
-          name: 'xterm-256color',
-          cols: process.stdout.columns || 80,
-          rows: process.stdout.rows || 24,
-          cwd: this.cwd,
-          env: process.env as { [key: string]: string },
-        });
-
-        // Store the process
-        this.runningProcesses.set(this.activeTool, ptyProcess);
-
-        // Handle process exit (user typed /exit in the tool)
-        ptyProcess.onExit(({ exitCode }) => {
-          console.log(`\n${colors.dim}${toolName} exited (code ${exitCode})${colors.reset}`);
-          this.runningProcesses.delete(this.activeTool);
-          
-          // Mark session as having history
-          if (this.activeTool === 'claude') {
-            this.claudeHasSession = true;
-          } else {
-            this.geminiHasSession = true;
-          }
-        });
-      }
-
-      // Track if we've sent the command
-      let commandSent = false;
-
       // Handle resize
       const onResize = () => {
-        ptyProcess!.resize(
-          process.stdout.columns || 80,
-          process.stdout.rows || 24
-        );
+        const p = manager.getPty();
+        if (p) {
+          p.resize(process.stdout.columns || 80, process.stdout.rows || 24);
+        }
       };
       process.stdout.on('resize', onResize);
 
-      // Function to send the command
-      const sendCommand = () => {
-        if (commandSent) return;
-        commandSent = true;
-        
-        // Type command character by character for reliability
-        let i = 0;
-        const fullCommand = slashCommand + '\r';
-        const typeNextChar = () => {
-          if (i < fullCommand.length) {
-            ptyProcess!.write(fullCommand[i]);
-            i++;
-            setTimeout(typeNextChar, 20);
-          }
-        };
-        typeNextChar();
-      };
-
-      // Pipe PTY output to terminal AND capture for forwarding
-      const outputDisposable = ptyProcess.onData((data) => {
-        // Filter out terminal response sequences (DA responses, etc.)
-        // These can cause garbage like "0u64;1;2;4;6;..." to appear
-        let filteredData = data;
-        
-        // Filter focus sequences from output too
-        filteredData = filteredData.split(FOCUS_IN_SEQ).join('').split(FOCUS_OUT_SEQ).join('');
-        
-        if (filteredData.length > 0) {
-          process.stdout.write(filteredData);
-        }
-        // Capture output for potential forwarding
-        const current = this.interactiveOutputBuffer.get(this.activeTool) || '';
-        this.interactiveOutputBuffer.set(this.activeTool, current + data);
-      });
-
-      // For reattach, send command quickly. For new process, wait for it to initialize.
-      const sendDelay = isReattach ? 100 : 2500;
-      const fallbackTimer = setTimeout(() => {
-        if (!commandSent) {
-          sendCommand();
-        }
-      }, sendDelay);
-
-      // Set up stdin forwarding with detach key detection
+      // Set up stdin forwarding
       if (process.stdin.isTTY) {
         process.stdin.setRawMode(true);
       }
@@ -1419,181 +988,113 @@ export class SDKSession {
 
       let detached = false;
       let lastEscapeTime = 0;
-
-      // Debug mode - set AIC_DEBUG=1 to see key codes
       const debugKeys = process.env.AIC_DEBUG === '1';
 
-      // Define onStdinData first so it can be referenced in performDetach
       let onStdinData: ((data: Buffer) => void) | null = null;
 
       const performDetach = () => {
         if (detached) return;
         detached = true;
 
-        // CRITICAL: Remove stdin listener IMMEDIATELY to prevent race conditions
-        // This must happen before any other cleanup to prevent re-entry
         if (onStdinData) {
           process.stdin.removeListener('data', onStdinData);
         }
 
+        manager.detach();
         cleanup();
 
-        // Clear the interactive output buffer (don't save to history - it's UI noise)
-        this.interactiveOutputBuffer.set(this.activeTool, '');
-
-        // Clear any pending terminal responses before showing detach message
-        process.stdout.write('\x1b[2K\r'); // Clear current line
+        process.stdout.write('\x1b[2K\r');
         console.log(`\n\n${colors.yellow}⏸${colors.reset} Detached from ${toolColor}${toolName}${colors.reset} ${colors.dim}(still running)${colors.reset}`);
-        console.log(`${colors.dim}Use ${colors.brightYellow}/i${colors.dim} to re-attach${colors.reset}`);
-        console.log(`${colors.dim}Press ${colors.brightYellow}Enter${colors.dim} to continue${colors.reset}\n`);
+        console.log(`${colors.dim}Use ${colors.brightYellow}/i${colors.dim} to re-attach${colors.reset}\n`);
         resolve();
       };
 
       onStdinData = (data: Buffer) => {
         let str = data.toString();
 
-        // Debug output to see what keys are being received
         if (debugKeys) {
           const hexBytes = Array.from(data).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' ');
           console.log(`\n[DEBUG] Received ${data.length} bytes: ${hexBytes}`);
         }
-        
-        // Filter out terminal focus reporting sequences (sent when window gains/loses focus)
-        // These cause ^[[I and ^[[O to appear in the terminal
+
+        // Filter focus sequences
         if (str === FOCUS_IN_SEQ || str === FOCUS_OUT_SEQ) {
-          if (debugKeys) console.log('[DEBUG] Filtered focus event');
-          return; // Don't forward to PTY
+          return;
         }
-        
-        // Also filter if focus sequences are embedded in the data
         str = str.split(FOCUS_IN_SEQ).join('').split(FOCUS_OUT_SEQ).join('');
-        if (str.length === 0) {
-          return; // Nothing left after filtering
-        }
-        
-        // Check for CSI u sequences (modern keyboard protocol used by iTerm2)
+        if (str.length === 0) return;
+
+        // Check for CSI u detach sequences
         for (const seq of CSI_U_DETACH_SEQS) {
           if (str === seq || str.includes(seq)) {
-            if (debugKeys) console.log(`[DEBUG] Detected CSI u detach sequence: ${seq.replace('\x1b', 'ESC')}`);
             performDetach();
             return;
           }
         }
-        
-        // Check for detach keys by examining raw bytes (traditional terminals)
-        // This is more reliable than string comparison for control characters
+
+        // Check for detach keys
         for (let i = 0; i < data.length; i++) {
           const byte = data[i];
-          
-          // Ctrl+] (0x1D = 29) - primary detach key
-          if (byte === DETACH_KEYS.CTRL_BRACKET) {
-            if (debugKeys) console.log('[DEBUG] Detected Ctrl+]');
-            performDetach();
-            return;
-          }
-          
-          // Ctrl+\ (0x1C = 28) - alternative detach key
-          if (byte === DETACH_KEYS.CTRL_BACKSLASH) {
-            if (debugKeys) console.log('[DEBUG] Detected Ctrl+\\');
-            performDetach();
-            return;
-          }
-          
-          // Ctrl+^ (0x1E = 30) - another alternative (Ctrl+Shift+6)
-          if (byte === DETACH_KEYS.CTRL_CARET) {
-            if (debugKeys) console.log('[DEBUG] Detected Ctrl+^');
-            performDetach();
-            return;
-          }
-          
-          // Ctrl+_ (0x1F = 31) - another alternative (Ctrl+Shift+-)
-          if (byte === DETACH_KEYS.CTRL_UNDERSCORE) {
-            if (debugKeys) console.log('[DEBUG] Detected Ctrl+_');
+          if (byte === DETACH_KEYS.CTRL_BRACKET ||
+              byte === DETACH_KEYS.CTRL_BACKSLASH ||
+              byte === DETACH_KEYS.CTRL_CARET ||
+              byte === DETACH_KEYS.CTRL_UNDERSCORE) {
             performDetach();
             return;
           }
         }
-        
-        // Handle escape sequences for double-escape detection
-        // Check for immediate double escape (0x1B 0x1B) anywhere in buffer
+
+        // Double escape detection
         if (data.length >= 2) {
           for (let i = 0; i < data.length - 1; i++) {
             if (data[i] === DETACH_KEYS.ESCAPE && data[i + 1] === DETACH_KEYS.ESCAPE) {
-              if (debugKeys) console.log('[DEBUG] Detected double-Escape');
               performDetach();
               return;
             }
           }
         }
 
-        // Single Escape (0x1B) - track for double-escape detection
+        // Single escape with timing
         const isSingleEscape = data.length === 1 && data[0] === DETACH_KEYS.ESCAPE;
         if (isSingleEscape) {
           const now = Date.now();
           if (now - lastEscapeTime < 500) {
-            // Double escape detected - detach!
-            if (debugKeys) console.log('[DEBUG] Detected double-Escape (timed)');
             performDetach();
             return;
           }
           lastEscapeTime = now;
-          // Still forward the escape to the PTY
-          ptyProcess!.write(str);
-          return;
-        }
-        
-        // Reset escape timer if not an escape key
-        if (!isSingleEscape) {
+        } else {
           lastEscapeTime = 0;
         }
-        
-        // Forward filtered data to PTY
-        ptyProcess!.write(str);
-      };
-      process.stdin.on('data', onStdinData);
 
-      // Handle process exit while attached
-      const exitHandler = () => {
-        if (!detached) {
-          cleanup();
-          console.log(`\n${colors.dim}Returned to ${colors.brightYellow}aic${colors.reset}\n`);
-          resolve();
-        }
+        // Forward to PTY
+        manager.write(str);
       };
-      ptyProcess.onExit(exitHandler);
+
+      process.stdin.on('data', onStdinData);
 
       // Cleanup function
       let cleanedUp = false;
       const cleanup = () => {
         if (cleanedUp) return;
         cleanedUp = true;
-        
-        clearTimeout(fallbackTimer);
+
         process.stdin.removeListener('data', onStdinData);
         process.stdout.removeListener('resize', onResize);
-        outputDisposable.dispose();
-        
-        // Clear the current line
+
         process.stdout.write('\x1b[2K\r');
-        
-        // Explicitly disable terminal features that cause garbage
         process.stdout.write('\x1b[?1004l'); // Disable focus reporting
         process.stdout.write('\x1b[?2004l'); // Disable bracketed paste
-        process.stdout.write('\x1b[>0u');    // Reset keyboard enhancement to legacy mode (CSI u)
-        process.stdout.write('\x1b[?25h');   // Ensure cursor is visible
-        
-        // Clear the interactive output buffer (don't save to history - it's UI noise)
-        this.interactiveOutputBuffer.set(this.activeTool, '');
+        process.stdout.write('\x1b[>0u');    // Reset keyboard enhancement
+        process.stdout.write('\x1b[?25h');   // Show cursor
 
         if (process.stdin.isTTY) {
           process.stdin.setRawMode(false);
         }
 
-        // Recreate readline to ensure clean state after PTY interaction
         this.rl?.close();
         this.setupReadline();
 
-        // Clear any garbage after a brief delay
         setTimeout(() => {
           process.stdout.write('\x1b[2K\r');
         }, 100);
@@ -1605,28 +1106,30 @@ export class SDKSession {
     console.log('');
 
     const statusLines = AVAILABLE_TOOLS.map(tool => {
-      const ptyProcess = this.runningProcesses.get(tool.name);
-      const hasSession = tool.name === 'claude' ? this.claudeHasSession : this.geminiHasSession;
+      const manager = this.ptyManagers.get(tool.name);
       const icon = tool.name === 'claude' ? '◆' : '◇';
 
+      // Check if we have conversation history for this tool
+      const hasHistory = this.conversationHistory.some(m => m.tool === tool.name);
+
       let status: string;
-      if (ptyProcess) {
-        // Check if the PTY process is still alive by checking its pid
-        try {
-          // process.kill with signal 0 checks if process exists without killing it
-          process.kill(ptyProcess.pid, 0);
-          status = `${colors.green}● Running${colors.reset} (PID: ${ptyProcess.pid})`;
-        } catch {
-          // Process is dead but we haven't cleaned up yet
-          status = `${colors.red}● Dead${colors.reset} (cleaning up...)`;
-          // Clean up the dead process
-          this.runningProcesses.delete(tool.name);
+      if (manager && !manager.isDead()) {
+        const state = manager.getState();
+        const pty = manager.getPty();
+        const pid = pty?.pid || 'unknown';
+
+        if (state === PtyState.ATTACHED) {
+          status = `${colors.green}● Attached${colors.reset} (PID: ${pid})`;
+        } else if (state === PtyState.PROCESSING) {
+          status = `${colors.yellow}● Processing${colors.reset} (PID: ${pid})`;
+        } else {
+          status = `${colors.green}● Running${colors.reset} (PID: ${pid})`;
         }
       } else {
         status = `${colors.dim}○ Stopped${colors.reset}`;
       }
 
-      const historyNote = hasSession ? `${colors.dim}(has history)${colors.reset}` : '';
+      const historyNote = hasHistory ? `${colors.dim}(has history)${colors.reset}` : '';
       return `${tool.color}${icon} ${tool.displayName.padEnd(12)}${colors.reset} ${status}  ${historyNote}`;
     });
 
@@ -1636,7 +1139,7 @@ export class SDKSession {
       statusLines.push(`${colors.yellow}⏳ Request in progress${colors.reset}`);
     }
 
-    console.log(drawBox(statusLines, 50));
+    console.log(drawBox(statusLines, 62));
     console.log('');
   }
 
@@ -1739,12 +1242,14 @@ export class SDKSession {
   }
 
   private async cleanup(): Promise<void> {
-    // Kill any running processes
-    for (const [tool, proc] of this.runningProcesses) {
-      console.log(`Stopping ${tool}...`);
-      proc.kill();
+    // Kill any running PTY managers
+    for (const [tool, manager] of this.ptyManagers) {
+      if (!manager.isDead()) {
+        console.log(`Stopping ${tool}...`);
+        manager.kill();
+      }
     }
-    this.runningProcesses.clear();
+    this.ptyManagers.clear();
   }
 }
 

@@ -4,6 +4,7 @@ import { Command } from 'commander';
 import { AdapterRegistry, ClaudeAdapter, GeminiAdapter } from './adapters/index.js';
 import { loadConfig, getDefaultTool, setDefaultTool, getConfigPath } from './config.js';
 import { startSDKSession } from './sdk-session.js';
+import { VERSION } from './version.js';
 
 const program = new Command();
 
@@ -50,7 +51,7 @@ Examples:
 program
   .name('aic')
   .description('AIC² - AI Code Connect\nBridge Claude Code and Gemini CLI')
-  .version('1.0.0')
+  .version(VERSION)
   .addHelpText('after', HELP_TEXT);
 
 // Tools command - list available tools

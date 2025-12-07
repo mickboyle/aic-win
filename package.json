@@ -42,9 +42,7 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "@inquirer/prompts": "^8.0.2",
     "commander": "^14.0.2",
-    "inquirer": "^13.0.2",
     "marked": "^15.0.12",
     "marked-terminal": "^7.3.0",
     "node-pty": "^1.0.0"

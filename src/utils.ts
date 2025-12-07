@@ -1,9 +1,5 @@
 import { spawn, SpawnOptions } from 'child_process';
-import { promisify } from 'util';
-import { exec as execCallback } from 'child_process';
 import * as pty from 'node-pty';
-
-const exec = promisify(execCallback);
 
 export interface RunResult {
   stdout: string;
@@ -146,11 +142,20 @@ export async function runCommandPty(
 
 /**
  * Check if a command exists in PATH
+ * Uses 'where' on Windows, 'which' on Unix-like systems
  */
 export async function commandExists(command: string): Promise<boolean> {
+  // Security: Validate command name to prevent injection
+  // Only allow alphanumeric, dash, and underscore
+  if (!/^[a-zA-Z0-9_-]+$/.test(command)) {
+    return false;
+  }
+
   try {
-    const { stdout } = await exec(`which ${command}`);
-    return stdout.trim().length > 0;
+    // Use 'where' on Windows, 'which' on Unix-like systems
+    const whichCommand = process.platform === 'win32' ? 'where' : 'which';
+    const result = await runCommand(whichCommand, [command]);
+    return result.exitCode === 0 && result.stdout.trim().length > 0;
   } catch {
     return false;
   }

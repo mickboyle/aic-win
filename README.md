@@ -209,13 +209,15 @@ Configuration is stored in `~/.aic/config.json`.
 ```
 src/
 ├── adapters/
-│   ├── base.ts           # ToolAdapter interface
-│   ├── claude.ts         # Claude Code adapter
-│   ├── gemini.ts         # Gemini CLI adapter
+│   ├── base.ts              # ToolAdapter interface
+│   ├── claude.ts            # Claude Code adapter
+│   ├── gemini.ts            # Gemini CLI adapter
 │   └── template.ts.example  # Template for new adapters
-├── sdk-session.ts        # Interactive session logic
-├── index.ts              # CLI entry point
-└── utils.ts              # Utilities
+├── sdk-session.ts           # Interactive session logic
+├── index.ts                 # CLI entry point
+├── config.ts                # Configuration management
+├── utils.ts                 # Utilities
+└── version.ts               # Version from package.json
 ```
 
 ## Adding New Tools
@@ -239,6 +241,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed instructions.
 - ✅ **Command menu** - Type `/` for autocomplete suggestions
 - ✅ **Forward responses** - One command to send between tools
 - ✅ **Modular adapters** - Easy to add new AI tools
+- ✅ **Cross-platform** - Works on macOS, Linux, and Windows
+- ✅ **Request locking** - Prevents concurrent request issues
+- ✅ **Memory safe** - Conversation history limits prevent memory leaks
 
 ## Development
 

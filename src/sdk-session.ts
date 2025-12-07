@@ -1,12 +1,12 @@
-import { spawn, ChildProcess, execSync } from 'child_process';
+import { execSync } from 'child_process';
 import { createInterface, Interface, CompleterResult } from 'readline';
-import { Writable } from 'stream';
 import * as pty from 'node-pty';
 import { IPty } from 'node-pty';
 import { marked } from 'marked';
 import TerminalRenderer from 'marked-terminal';
 import { stripAnsi } from './utils.js';
 import { getDefaultTool, setDefaultTool } from './config.js';
+import { VERSION } from './version.js';
 
 /**
  * Get the version of a CLI tool
@@ -40,6 +40,10 @@ interface Message {
   role: 'user' | 'assistant';
   content: string;
 }
+
+// Constants
+const MAX_HISTORY_SIZE = 1000;
+const REQUEST_TIMEOUT_MS = 120000;
 
 // Detach key codes - multiple options for compatibility across terminals
 // Traditional raw control characters (used by Terminal.app and others)
@@ -188,8 +192,6 @@ ${colors.brightCyan}    ██╔══██║ ${colors.brightMagenta}██�
 ${colors.brightCyan}    ██║  ██║ ${colors.brightMagenta}██║${colors.brightYellow}╚██████╗${colors.reset}
 ${colors.brightCyan}    ╚═╝  ╚═╝ ${colors.brightMagenta}╚═╝${colors.brightYellow} ╚═════╝${colors.reset}
 `;
-
-const VERSION = 'v1.0.0';
 
 // Tool configuration - add new tools here
 interface ToolConfig {
@@ -383,9 +385,8 @@ export class SDKSession {
   private rl: Interface | null = null;
   private inputHistory: string[] = [];
 
-  // Current running process (for cancellation support)
-  private currentProcess: ChildProcess | null = null;
-  private cancelRequested = false;
+  // Request state management
+  private requestInProgress = false;
 
   constructor(cwd?: string) {
     this.cwd = cwd || process.cwd();
@@ -451,7 +452,7 @@ export class SDKSession {
     // Banner with title and connected tools on the right side
     const bannerLines = AIC_BANNER.trim().split('\n');
     const titleLines = [
-      `${colors.brightCyan}A${colors.brightMagenta}I${colors.reset} ${colors.brightYellow}C${colors.white}ode${colors.reset} ${colors.brightYellow}C${colors.white}onnect${colors.reset}  ${colors.dim}${VERSION}${colors.reset}`,
+      `${colors.brightCyan}A${colors.brightMagenta}I${colors.reset} ${colors.brightYellow}C${colors.white}ode${colors.reset} ${colors.brightYellow}C${colors.white}onnect${colors.reset}  ${colors.dim}v${VERSION}${colors.reset}`,
       '',
       `${colors.dim}Connected Tools:${colors.reset}`,
       claudeVersion 
@@ -564,18 +565,13 @@ export class SDKSession {
       prompt: this.getPrompt(),
     });
 
-    // Handle Ctrl+C gracefully - cancel current operation or exit
+    // Handle Ctrl+C gracefully - exit the application
     this.rl.on('SIGINT', () => {
-      // If a request is in progress, cancel just that request
-      if (this.currentProcess) {
-        console.log(`\n${colors.yellow}Cancelling current request...${colors.reset}`);
-        this.cancelRequested = true;
-        this.currentProcess.kill('SIGTERM');
-        // The process close handler will clean up and reject the promise
+      if (this.requestInProgress) {
+        console.log(`\n${colors.yellow}Request in progress - please wait or use /i to interact${colors.reset}`);
         return;
       }
 
-      // No request in progress - exit the application
       console.log('\n');
       this.rl?.close();
       this.cleanup().then(() => {
@@ -783,6 +779,14 @@ export class SDKSession {
   }
 
   private async sendToTool(message: string): Promise<void> {
+    // Prevent concurrent requests
+    if (this.requestInProgress) {
+      console.log(`${colors.yellow}⏳ Please wait for the current request to finish${colors.reset}`);
+      return;
+    }
+
+    this.requestInProgress = true;
+
     // Record user message
     this.conversationHistory.push({
       tool: this.activeTool,
@@ -790,9 +794,14 @@ export class SDKSession {
       content: message,
     });
 
+    // Enforce history size limit
+    while (this.conversationHistory.length > MAX_HISTORY_SIZE) {
+      this.conversationHistory.shift();
+    }
+
     try {
       let response: string;
-      
+
       if (this.activeTool === 'claude') {
         response = await this.sendToClaude(message);
       } else {
@@ -805,18 +814,19 @@ export class SDKSession {
         role: 'assistant',
         content: response,
       });
+
+      // Enforce history size limit again after adding response
+      while (this.conversationHistory.length > MAX_HISTORY_SIZE) {
+        this.conversationHistory.shift();
+      }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-
-      // Handle cancellation gracefully - not an error
-      if (errorMessage === 'Request cancelled by user') {
-        console.log(`${colors.dim}Request cancelled. You can try again or use /i to check the session.${colors.reset}\n`);
-      } else {
-        console.error(`\n${colors.red}Error:${colors.reset} ${errorMessage}\n`);
-      }
+      console.error(`\n${colors.red}Error:${colors.reset} ${errorMessage}\n`);
 
       // Remove the user message if failed
       this.conversationHistory.pop();
+    } finally {
+      this.requestInProgress = false;
     }
   }
 
@@ -846,69 +856,70 @@ export class SDKSession {
 
       let outputBuffer = '';
       let finished = false;
+      let outputHandler: { dispose: () => void } | null = null;
+      let timeoutHandle: NodeJS.Timeout | null = null;
+
+      // Consolidated cleanup function - prevents double cleanup
+      const cleanup = () => {
+        if (timeoutHandle) {
+          clearTimeout(timeoutHandle);
+          timeoutHandle = null;
+        }
+        if (outputHandler) {
+          outputHandler.dispose();
+          outputHandler = null;
+        }
+        spinner.stop();
+        try {
+          ptyProc.kill();
+        } catch {
+          // Process already dead
+        }
+      };
 
       // Handle PTY output
-      const outputHandler = ptyProc.onData((data: string) => {
+      outputHandler = ptyProc.onData((data: string) => {
         outputBuffer += data;
         spinner.setStatus(data);
       });
 
-      const finishSuccess = () => {
-        if (finished) return;
-        finished = true;
-
-        outputHandler.dispose();
-        spinner.stop();
-        ptyProc.kill();
-
-        const response = stripAnsi(outputBuffer).trim();
-
-        // Render the response
-        console.log('');
-        if (response) {
-          const rendered = marked.parse(response) as string;
-          process.stdout.write(rendered);
-        }
-        console.log('');
-
-        this.claudeHasSession = true;
-        resolve(response);
-      };
-
       // Handle process exit
       ptyProc.onExit(({ exitCode }) => {
         if (finished) return;
+        finished = true;
+        cleanup();
 
-        outputHandler.dispose();
-        spinner.stop();
+        const response = stripAnsi(outputBuffer).trim();
 
         if (exitCode === 0) {
-          finishSuccess();
+          // Render the response
+          console.log('');
+          if (response) {
+            const rendered = marked.parse(response) as string;
+            process.stdout.write(rendered);
+          }
+          console.log('');
+          this.claudeHasSession = true;
+          resolve(response);
         } else {
-          finished = true;
           // Non-zero exit might mean Claude needs interaction
           console.log('');
           console.log(`${colors.yellow}⚠ Claude may need your input.${colors.reset} Use ${colors.brightYellow}/i${colors.reset} to interact.`);
           console.log('');
           this.claudeHasSession = true;
-          resolve(stripAnsi(outputBuffer).trim());
+          resolve(response);
         }
       });
 
-      // Timeout fallback
-      setTimeout(() => {
+      // Timeout fallback - reject instead of silent resolve
+      timeoutHandle = setTimeout(() => {
         if (finished) return;
         finished = true;
-        spinner.stop();
-        outputHandler.dispose();
-        ptyProc.kill();
-        console.log(`\n${colors.yellow}⚠ Timeout - use /i to check session${colors.reset}\n`);
-        this.claudeHasSession = true;
-        resolve(stripAnsi(outputBuffer).trim());
-      }, 120000);
+        cleanup();
+        reject(new Error(`Request timeout after ${REQUEST_TIMEOUT_MS / 1000} seconds. Use /i to check session.`));
+      }, REQUEST_TIMEOUT_MS);
     });
   }
-
 
   private sendToGemini(message: string): Promise<string> {
     return new Promise((resolve, reject) => {
@@ -936,12 +947,8 @@ export class SDKSession {
 
       let outputBuffer = '';
       let finished = false;
-
-      // Handle PTY output
-      const outputHandler = ptyProc.onData((data: string) => {
-        outputBuffer += data;
-        spinner.setStatus(data);
-      });
+      let outputHandler: { dispose: () => void } | null = null;
+      let timeoutHandle: NodeJS.Timeout | null = null;
 
       const cleanGeminiOutput = (output: string): string => {
         // Remove "Loaded cached credentials." line and clean up
@@ -952,59 +959,65 @@ export class SDKSession {
           .trim();
       };
 
-      const finishSuccess = () => {
-        if (finished) return;
-        finished = true;
-
-        outputHandler.dispose();
-        spinner.stop();
-        ptyProc.kill();
-
-        const response = cleanGeminiOutput(outputBuffer);
-
-        // Render the response
-        console.log('');
-        if (response) {
-          const rendered = marked.parse(response) as string;
-          process.stdout.write(rendered);
+      // Consolidated cleanup function - prevents double cleanup
+      const cleanup = () => {
+        if (timeoutHandle) {
+          clearTimeout(timeoutHandle);
+          timeoutHandle = null;
         }
-        console.log('');
-
-        this.geminiHasSession = true;
-        resolve(response);
+        if (outputHandler) {
+          outputHandler.dispose();
+          outputHandler = null;
+        }
+        spinner.stop();
+        try {
+          ptyProc.kill();
+        } catch {
+          // Process already dead
+        }
       };
+
+      // Handle PTY output
+      outputHandler = ptyProc.onData((data: string) => {
+        outputBuffer += data;
+        spinner.setStatus(data);
+      });
 
       // Handle process exit
       ptyProc.onExit(({ exitCode }) => {
         if (finished) return;
+        finished = true;
+        cleanup();
 
-        outputHandler.dispose();
-        spinner.stop();
+        const response = cleanGeminiOutput(outputBuffer);
 
         if (exitCode === 0) {
-          finishSuccess();
+          // Render the response
+          console.log('');
+          if (response) {
+            const rendered = marked.parse(response) as string;
+            process.stdout.write(rendered);
+          }
+          console.log('');
+          this.geminiHasSession = true;
+          resolve(response);
         } else {
-          finished = true;
           // Non-zero exit might mean Gemini needs interaction
           console.log('');
           console.log(`${colors.yellow}⚠ Gemini may need your input.${colors.reset} Use ${colors.brightYellow}/i${colors.reset} to interact.`);
           console.log('');
           this.geminiHasSession = true;
-          resolve(cleanGeminiOutput(outputBuffer));
+          resolve(response);
         }
       });
 
-      // Timeout fallback
-      setTimeout(() => {
+      // Timeout fallback - reject instead of silent resolve
+      timeoutHandle = setTimeout(() => {
         if (finished) return;
         finished = true;
-        spinner.stop();
-        outputHandler.dispose();
-        ptyProc.kill();
-        console.log(`\n${colors.yellow}⚠ Timeout - use /i to check session${colors.reset}\n`);
-        this.geminiHasSession = true;
-        resolve(cleanGeminiOutput(outputBuffer));
-      }, 120000);
+        cleanup();
+        reject(new Error(`Request timeout after ${REQUEST_TIMEOUT_MS / 1000} seconds. Use /i to check session.`));
+      }, REQUEST_TIMEOUT_MS);
     });
   }
 
@@ -1111,11 +1124,24 @@ export class SDKSession {
       let detached = false;
       let lastEscapeTime = 0;
 
+      // Debug mode - set AIC_DEBUG=1 to see key codes
+      const debugKeys = process.env.AIC_DEBUG === '1';
+
+      // Define onStdinData first so it can be referenced in performDetach
+      let onStdinData: ((data: Buffer) => void) | null = null;
+
       const performDetach = () => {
         if (detached) return;
         detached = true;
+
+        // CRITICAL: Remove stdin listener IMMEDIATELY to prevent race conditions
+        // This must happen before any other cleanup to prevent re-entry
+        if (onStdinData) {
+          process.stdin.removeListener('data', onStdinData);
+        }
+
         cleanup();
-        
+
         // Clear the interactive output buffer (don't save to history - it's UI noise)
         this.interactiveOutputBuffer.set(this.activeTool, '');
 
@@ -1127,10 +1153,7 @@ export class SDKSession {
         resolve();
       };
 
-      // Debug mode - set AIC_DEBUG=1 to see key codes
-      const debugKeys = process.env.AIC_DEBUG === '1';
-
-      const onStdinData = (data: Buffer) => {
+      onStdinData = (data: Buffer) => {
         let str = data.toString();
         
         // Debug output to see what keys are being received
@@ -1399,15 +1422,25 @@ export class SDKSession {
 
       let detached = false;
       let lastEscapeTime = 0;
-      
+
       // Debug mode - set AIC_DEBUG=1 to see key codes
       const debugKeys = process.env.AIC_DEBUG === '1';
+
+      // Define onStdinData first so it can be referenced in performDetach
+      let onStdinData: ((data: Buffer) => void) | null = null;
 
       const performDetach = () => {
         if (detached) return;
         detached = true;
+
+        // CRITICAL: Remove stdin listener IMMEDIATELY to prevent race conditions
+        // This must happen before any other cleanup to prevent re-entry
+        if (onStdinData) {
+          process.stdin.removeListener('data', onStdinData);
+        }
+
         cleanup();
-        
+
         // Clear the interactive output buffer (don't save to history - it's UI noise)
         this.interactiveOutputBuffer.set(this.activeTool, '');
 
@@ -1419,7 +1452,7 @@ export class SDKSession {
         resolve();
       };
 
-      const onStdinData = (data: Buffer) => {
+      onStdinData = (data: Buffer) => {
         let str = data.toString();
 
         // Debug output to see what keys are being received
@@ -1601,9 +1634,9 @@ export class SDKSession {
     });
 
     // Add current request status
-    if (this.currentProcess) {
+    if (this.requestInProgress) {
       statusLines.push('');
-      statusLines.push(`${colors.yellow}⏳ Request in progress${colors.reset} - Ctrl+C to cancel`);
+      statusLines.push(`${colors.yellow}⏳ Request in progress${colors.reset}`);
     }
 
     console.log(drawBox(statusLines, 50));

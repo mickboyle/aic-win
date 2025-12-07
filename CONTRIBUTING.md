@@ -1,19 +1,45 @@
-# Adding New AI CLI Tools to AIC²
+# Contributing to AIC²
 
 AIC² uses a modular adapter pattern that makes it easy to add new AI CLI tools.
 
-## Architecture
+## Project Structure
 
 ```
-src/adapters/
-├── base.ts          # ToolAdapter interface & registry
-├── claude.ts        # Claude Code adapter
-├── gemini.ts        # Gemini CLI adapter
-├── index.ts         # Exports all adapters
-└── template.ts.example  # Template for new adapters
+src/
+├── adapters/
+│   ├── base.ts              # ToolAdapter interface & registry
+│   ├── claude.ts            # Claude Code adapter
+│   ├── gemini.ts            # Gemini CLI adapter
+│   ├── index.ts             # Exports all adapters
+│   └── template.ts.example  # Template for new adapters
+├── sdk-session.ts           # Interactive session & command handling
+├── index.ts                 # CLI entry point
+├── config.ts                # Configuration management (~/.aic/)
+├── utils.ts                 # Utility functions
+└── version.ts               # Version (reads from package.json)
 ```
 
-## Step-by-Step Guide
+## Development Setup
+
+```bash
+git clone https://github.com/jacob-bd/ai-code-connect.git
+cd ai-code-connect
+npm install
+npm run build
+npm link  # Makes 'aic' available globally
+```
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `npm run dev` | Run in development mode (tsx) |
+| `npm run build` | Compile TypeScript |
+| `npm test` | Run tests |
+| `npm run test:watch` | Run tests in watch mode |
+| `npx tsc --noEmit` | Type-check without building |
+
+## Adding New AI CLI Tools
 
 ### Step 1: Create the Adapter
 
@@ -176,8 +202,45 @@ See the template file for a complete working example:
 src/adapters/template.ts.example
 ```
 
+## Code Guidelines
+
+### Versioning
+
+Version is managed in `package.json` only. The `src/version.ts` file reads from package.json at runtime, ensuring a single source of truth.
+
+```typescript
+// src/version.ts - DO NOT hardcode versions elsewhere
+import { VERSION } from './version.js';
+```
+
+### Code Style
+
+- **TypeScript**: Use strict types, avoid `any`
+- **Imports**: Use `.js` extensions for relative imports (ESM requirement)
+- **Async**: Use `async/await` over raw promises
+- **Constants**: Extract magic numbers to named constants
+- **Cleanup**: Always use `try/finally` for resource cleanup
+
+### Testing
+
+Tests live alongside source files with `.test.ts` suffix:
+
+```bash
+npm test           # Run once
+npm run test:watch # Watch mode
+```
+
+Add tests for any new utility functions. Integration tests for adapters are optional but appreciated.
+
+### Security Considerations
+
+- **Input validation**: Validate command names before shell execution
+- **No shell interpolation**: Use `spawn()` with arrays, not `exec()` with strings
+- **File permissions**: Config files should use mode `0o600`
+
 ## Questions?
 
 The adapter pattern is designed to be flexible. If your tool has unique requirements,
 you can extend the `ToolAdapter` interface or add tool-specific methods.
 
+Open an issue at [github.com/jacob-bd/ai-code-connect/issues](https://github.com/jacob-bd/ai-code-connect/issues) for questions or feature requests.

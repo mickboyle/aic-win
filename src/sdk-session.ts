@@ -1046,6 +1046,15 @@ export class SDKSession {
           return;
         }
         str = str.split(FOCUS_IN_SEQ).join('').split(FOCUS_OUT_SEQ).join('');
+
+        // Filter terminal response sequences (DA responses, keyboard enhancement, etc.)
+        // Full sequences: ESC[?...c, ESC[>...c, ESC[?...u
+        // These must be filtered BEFORE forwarding to PTY to prevent echo
+        str = str
+          .replace(/\x1b\[\?[\d;]*[uc]/g, '')   // ESC[?...c or ESC[?...u
+          .replace(/\x1b\[>[\d;]*c/g, '')       // ESC[>...c
+          .replace(/\x1b\[[\d;]*u/g, '');       // ESC[...u (CSI u)
+
         if (str.length === 0) return;
 
         // Check for CSI u detach sequences

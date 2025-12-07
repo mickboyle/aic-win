@@ -223,12 +223,23 @@ export class PersistentPtyManager {
         .split(FOCUS_IN_SEQ).join('')
         .split(FOCUS_OUT_SEQ).join('');
 
-      // Filter Device Attributes responses (e.g., "64;1;2;4;6;17;18;21;22;52c" or "0u64;...")
-      // These are terminal responses to DA queries that leak through
+      // Filter terminal response sequences that leak through
+      // These include DA responses, keyboard protocol responses, etc.
+      const beforeFilter = filteredData;
       filteredData = filteredData
-        .replace(/\d*u?[\d;]+c/g, '')           // DA response ending in 'c'
-        .replace(/\x1b\[\?[\d;]+c/g, '')        // ESC[?...c (Primary DA)
-        .replace(/\x1b\[>[\d;]+c/g, '');        // ESC[>...c (Secondary DA)
+        .replace(/\x1b\[\?[\d;]*[uc]/g, '')     // ESC[?...c or ESC[?...u (full sequences)
+        .replace(/\x1b\[>[\d;]*c/g, '')         // ESC[>...c (Secondary DA)
+        .replace(/\x1b\[[\d;]*u/g, '')          // ESC[...u (CSI u)
+        .replace(/\x1b\[c/g, '')                // ESC[c Primary DA query - DON'T send to terminal!
+        .replace(/\x1b\[>c/g, '')               // ESC[>c Secondary DA query
+        // Orphaned remnants from fragmented escape sequences
+        .replace(/\b0u\b/g, '')                 // Keyboard enhancement "0u"
+        .replace(/\b\d{2,};[\d;]+c\b/g, '');    // DA response "64;1;2;...c"
+
+      // Debug: log filtered sequences when AIC_DEBUG=1
+      if (process.env.AIC_DEBUG === '1' && beforeFilter !== filteredData) {
+        console.log(`\n[DEBUG] PTY filtered ${beforeFilter.length - filteredData.length} bytes of terminal sequences`);
+      }
 
       if (filteredData.length > 0) {
         process.stdout.write(filteredData);

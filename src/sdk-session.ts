@@ -1116,25 +1116,13 @@ export class SDKSession {
         detached = true;
         cleanup();
         
-        // Save captured output to conversation history for forwarding
-        const capturedOutput = this.interactiveOutputBuffer.get(this.activeTool);
-        if (capturedOutput) {
-          const cleanedOutput = stripAnsi(capturedOutput).trim();
-          if (cleanedOutput.length > 50) { // Only save meaningful output
-            this.conversationHistory.push({
-              tool: this.activeTool,
-              role: 'assistant',
-              content: cleanedOutput,
-            });
-          }
-          // Clear buffer after saving
-          this.interactiveOutputBuffer.set(this.activeTool, '');
-        }
+        // Clear the interactive output buffer (don't save to history - it's UI noise)
+        this.interactiveOutputBuffer.set(this.activeTool, '');
 
         // Clear any pending terminal responses before showing detach message
         process.stdout.write('\x1b[2K\r'); // Clear current line
         console.log(`\n\n${colors.yellow}⏸${colors.reset} Detached from ${toolColor}${toolName}${colors.reset} ${colors.dim}(still running)${colors.reset}`);
-        console.log(`${colors.dim}Use ${colors.brightYellow}/i${colors.dim} to re-attach • ${colors.brightGreen}/forward${colors.dim} to send to other tool${colors.reset}`);
+        console.log(`${colors.dim}Use ${colors.brightYellow}/i${colors.dim} to re-attach${colors.reset}`);
         console.log(`${colors.dim}Press ${colors.brightYellow}Enter${colors.dim} to continue${colors.reset}\n`);
         resolve();
       };
@@ -1420,25 +1408,13 @@ export class SDKSession {
         detached = true;
         cleanup();
         
-        // Save captured output to conversation history for forwarding
-        const capturedOutput = this.interactiveOutputBuffer.get(this.activeTool);
-        if (capturedOutput) {
-          const cleanedOutput = stripAnsi(capturedOutput).trim();
-          if (cleanedOutput.length > 50) { // Only save meaningful output
-            this.conversationHistory.push({
-              tool: this.activeTool,
-              role: 'assistant',
-              content: cleanedOutput,
-            });
-          }
-          // Clear buffer after saving
-          this.interactiveOutputBuffer.set(this.activeTool, '');
-        }
+        // Clear the interactive output buffer (don't save to history - it's UI noise)
+        this.interactiveOutputBuffer.set(this.activeTool, '');
 
         // Clear any pending terminal responses before showing detach message
         process.stdout.write('\x1b[2K\r'); // Clear current line
         console.log(`\n\n${colors.yellow}⏸${colors.reset} Detached from ${toolColor}${toolName}${colors.reset} ${colors.dim}(still running)${colors.reset}`);
-        console.log(`${colors.dim}Use ${colors.brightYellow}/i${colors.dim} to re-attach • ${colors.brightGreen}/forward${colors.dim} to send to other tool${colors.reset}`);
+        console.log(`${colors.dim}Use ${colors.brightYellow}/i${colors.dim} to re-attach${colors.reset}`);
         console.log(`${colors.dim}Press ${colors.brightYellow}Enter${colors.dim} to continue${colors.reset}\n`);
         resolve();
       };
@@ -1576,19 +1552,8 @@ export class SDKSession {
         process.stdout.write('\x1b[>0u');    // Reset keyboard enhancement to legacy mode (CSI u)
         process.stdout.write('\x1b[?25h');   // Ensure cursor is visible
         
-        // Save captured output to conversation history
-        const capturedOutput = this.interactiveOutputBuffer.get(this.activeTool);
-        if (capturedOutput) {
-          const cleanedOutput = stripAnsi(capturedOutput).trim();
-          if (cleanedOutput.length > 50) { 
-            this.conversationHistory.push({
-              tool: this.activeTool,
-              role: 'assistant',
-              content: cleanedOutput,
-            });
-          }
-          this.interactiveOutputBuffer.set(this.activeTool, '');
-        }
+        // Clear the interactive output buffer (don't save to history - it's UI noise)
+        this.interactiveOutputBuffer.set(this.activeTool, '');
 
         if (process.stdin.isTTY) {
           process.stdin.setRawMode(false);

@@ -77,9 +77,9 @@ export class ClaudeAdapter implements ToolAdapter {
 
     if (!isSlashCommand) {
       args.push('-p'); // Print mode for regular prompts
-      // Enable tools in print mode (requires permission mode to auto-approve)
-      args.push('--tools', 'default');
-      args.push('--permission-mode', 'acceptEdits');
+      // Note: We intentionally don't enable --tools or --permission-mode here
+      // This makes print mode read-only (no file edits without user consent)
+      // Use /i (interactive mode) for full tool access with approvals
     }
 
     // Use session args to isolate and continue aic's sessions

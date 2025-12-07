@@ -2,8 +2,8 @@ import { createInterface, Interface, CompleterResult } from 'readline';
 import { marked } from 'marked';
 import TerminalRenderer from 'marked-terminal';
 import { stripAnsi, commandExists } from './utils.js';
-import { getDefaultTool, setDefaultTool } from './config.js';
-import { VERSION } from './version.js';
+import { getDefaultTool, setDefaultTool, shouldCheckVersion, setVersionCache, getVersionCache } from './config.js';
+import { VERSION, PACKAGE_NAME, checkForUpdates } from './version.js';
 import { AdapterRegistry } from './adapters/base.js';
 import { PersistentPtyManager, PtyState, PtyConfig } from './persistent-pty.js';
 
@@ -427,10 +427,40 @@ export class SDKSession {
     const width = getTerminalWidth();
 
     // Fast availability check using 'which' command (~50ms total vs ~4s for version checks)
-    const [claudeAvailable, geminiAvailable] = await Promise.all([
+    // Also check for updates in parallel (only if cache is stale)
+    const versionCheckPromise = shouldCheckVersion() ? checkForUpdates() : Promise.resolve(null);
+
+    const [claudeAvailable, geminiAvailable, updateInfo] = await Promise.all([
       commandExists('claude'),
-      commandExists('gemini')
+      commandExists('gemini'),
+      versionCheckPromise,
     ]);
+
+    // Cache the version check result if we got one
+    if (updateInfo) {
+      setVersionCache({
+        lastCheck: Date.now(),
+        latestVersion: updateInfo.latestVersion,
+      });
+    }
+
+    // Check if update is available (from fresh check or cache)
+    let updateAvailable = updateInfo?.updateAvailable || false;
+    let latestVersion = updateInfo?.latestVersion || '';
+    if (!updateInfo) {
+      // Use cached version info
+      const cache = getVersionCache();
+      if (cache && cache.latestVersion !== VERSION) {
+        // Simple check: if cached version differs, assume it's newer
+        const parts1 = cache.latestVersion.split('.').map(Number);
+        const parts2 = VERSION.split('.').map(Number);
+        updateAvailable = parts1[0] > parts2[0] ||
+          (parts1[0] === parts2[0] && parts1[1] > parts2[1]) ||
+          (parts1[0] === parts2[0] && parts1[1] === parts2[1] && parts1[2] > parts2[2]);
+        latestVersion = cache.latestVersion;
+      }
+    }
+
     const availableCount = (claudeAvailable ? 1 : 0) + (geminiAvailable ? 1 : 0);
 
     // Handle no tools available
@@ -507,8 +537,16 @@ export class SDKSession {
     
     console.log('');
     console.log(fullWidthLine('─'));
+
+    // Show update notification if available
+    if (updateAvailable && latestVersion) {
+      console.log('');
+      console.log(`  ${colors.yellow}⬆ Update available:${colors.reset} ${colors.dim}v${VERSION}${colors.reset} → ${colors.green}v${latestVersion}${colors.reset}`);
+      console.log(`    ${colors.dim}Run:${colors.reset} npm update -g ${PACKAGE_NAME}`);
+    }
+
     console.log('');
-    
+
     // Commands in a wider layout (single slash = AIC commands, double slash = tool commands via interactive mode)
     const commandsLeft = [
       `  ${rainbowText('/claude')}        Switch to Claude Code ${colors.dim}(-i for interactive)${colors.reset}`,

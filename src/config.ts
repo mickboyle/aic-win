@@ -7,11 +7,17 @@ export interface ToolConfig {
   defaultFlags?: string[];
 }
 
+export interface VersionCache {
+  lastCheck: number;  // timestamp
+  latestVersion: string;
+}
+
 export interface Config {
   defaultTool: string;
   tools: {
     [name: string]: ToolConfig;
   };
+  versionCache?: VersionCache;
 }
 
 const DEFAULT_CONFIG: Config = {
@@ -109,21 +115,52 @@ export function getDefaultTool(): string {
 export function setDefaultTool(tool: string): { success: boolean; message: string } {
   const validTools = ['claude', 'gemini'];
   const normalizedTool = tool.toLowerCase();
-  
+
   if (!validTools.includes(normalizedTool)) {
-    return { 
-      success: false, 
-      message: `Invalid tool "${tool}". Valid options: ${validTools.join(', ')}` 
+    return {
+      success: false,
+      message: `Invalid tool "${tool}". Valid options: ${validTools.join(', ')}`
     };
   }
-  
+
   const config = loadConfig();
   config.defaultTool = normalizedTool;
   saveConfig(config);
-  
-  return { 
-    success: true, 
-    message: `Default tool set to "${normalizedTool}". Will be used on next launch.` 
+
+  return {
+    success: true,
+    message: `Default tool set to "${normalizedTool}". Will be used on next launch.`
   };
+}
+
+/**
+ * Get the cached version info
+ */
+export function getVersionCache(): VersionCache | undefined {
+  const config = loadConfig();
+  return config.versionCache;
+}
+
+/**
+ * Save version cache to config
+ */
+export function setVersionCache(cache: VersionCache): void {
+  const config = loadConfig();
+  config.versionCache = cache;
+  saveConfig(config);
+}
+
+// Cache version checks for 24 hours
+const VERSION_CHECK_INTERVAL = 24 * 60 * 60 * 1000;
+
+/**
+ * Check if we should perform a version check (based on cache age)
+ */
+export function shouldCheckVersion(): boolean {
+  const cache = getVersionCache();
+  if (!cache) return true;
+
+  const age = Date.now() - cache.lastCheck;
+  return age > VERSION_CHECK_INTERVAL;
 }
 

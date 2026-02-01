@@ -1,14 +1,24 @@
 import { randomUUID } from 'crypto';
 import { ToolAdapter, SendOptions } from './base.js';
-import { runCommand, commandExists, stripAnsi } from '../utils.js';
+import { runCommand, commandExists, stripAnsi, debugLog } from '../utils.js';
 
 /**
- * Adapter for Claude Code CLI
+ * Adapter for Claude Code CLI.
  *
- * Claude Code supports:
- * - Non-interactive mode via -p/--print flag
+ * This adapter provides integration with Anthropic's Claude Code CLI tool.
+ *
+ * Features:
+ * - Non-interactive mode via -p/--print flag for programmatic use
  * - Output formats: text, json, stream-json
- * - Session continuation via --session-id (isolated from other sessions in same directory)
+ * - Session continuation via --session-id (isolated from other sessions)
+ * - Stdin-based prompt delivery (avoids Windows shell escaping issues)
+ *
+ * Installation:
+ * ```bash
+ * npm install -g @anthropic-ai/claude-code
+ * ```
+ *
+ * @see https://docs.anthropic.com/claude-code
  */
 export class ClaudeAdapter implements ToolAdapter {
   readonly name = 'claude';
@@ -231,31 +241,71 @@ export class ClaudeAdapter implements ToolAdapter {
     return output.trim();
   }
 
+  /**
+   * Send a prompt to Claude Code and get a response.
+   *
+   * Uses print mode (-p) with JSON output for clean response extraction.
+   * The prompt is passed via stdin to avoid Windows shell escaping issues.
+   *
+   * @param prompt - The prompt to send
+   * @param options - Options including cwd, continueSession, timeout
+   * @returns Promise resolving to the response text
+   * @throws Error if Claude Code fails or returns an error
+   */
   async send(prompt: string, options?: SendOptions): Promise<string> {
+    debugLog('ClaudeAdapter.send', 'Sending prompt', {
+      promptLength: prompt.length,
+      continueSession: options?.continueSession,
+    });
+
     // For print mode (-p), use non-interactive runCommand to avoid messing with stdin
     const allArgs = this.getCommand(prompt, options).slice(1); // Remove 'claude' from start
 
     // Separating prompt from arguments to pass via stdin
     // getCommand adds the prompt as the last argument for non-slash commands
     const isSlashCommand = prompt.startsWith('/');
-    
+
     let args = allArgs;
     let input: string | undefined = undefined;
 
     if (!isSlashCommand) {
       // The last argument should be the prompt
-      // We remove it from args and pass it as input
+      // We remove it from args and pass it as input via stdin
+      // This avoids Windows shell escaping issues with special characters
       if (args.length > 0 && args[args.length - 1] === prompt) {
         args = args.slice(0, -1);
         input = prompt;
       }
     }
 
-    const result = await runCommand('claude', args, {
-      cwd: options?.cwd || process.cwd(),
-    }, input);
+    debugLog('ClaudeAdapter.send', 'Executing command', { argsCount: args.length, hasInput: !!input });
+
+    let result;
+    try {
+      result = await runCommand('claude', args, {
+        cwd: options?.cwd || process.cwd(),
+      }, input);
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      debugLog('ClaudeAdapter.send', 'Command execution failed', { error: errorMsg });
+
+      // Provide helpful error messages
+      if (errorMsg.includes('not found') || errorMsg.includes('ENOENT')) {
+        throw new Error(
+          'Claude Code CLI is not installed or not in PATH.\n' +
+          'Install it with: npm install -g @anthropic-ai/claude-code\n' +
+          'Then run "claude" once to complete setup.'
+        );
+      }
+      throw error;
+    }
 
     if (result.exitCode !== 0) {
+      debugLog('ClaudeAdapter.send', 'Non-zero exit code', {
+        exitCode: result.exitCode,
+        stderr: result.stderr.slice(0, 200),
+      });
+
       // Try to parse error from JSON response
       try {
         const errorJson = JSON.parse(result.stdout);
@@ -265,7 +315,17 @@ export class ClaudeAdapter implements ToolAdapter {
       } catch {
         // Fall back to raw error message
       }
+
       const errorMsg = result.stderr.trim() || result.stdout.trim() || 'Unknown error';
+
+      // Provide specific guidance for common errors
+      if (errorMsg.includes('API key') || errorMsg.includes('authentication')) {
+        throw new Error(
+          `Claude Code authentication error: ${errorMsg}\n` +
+          'Run "claude" interactively to authenticate.'
+        );
+      }
+
       throw new Error(`Claude Code exited with code ${result.exitCode}: ${errorMsg}`);
     }
 
@@ -278,9 +338,11 @@ export class ClaudeAdapter implements ToolAdapter {
       if (response.is_error) {
         throw new Error(response.result || 'Unknown error from Claude');
       }
+      debugLog('ClaudeAdapter.send', 'Response received', { resultLength: (response.result || '').length });
       return response.result || '';
     } catch (parseError) {
       // Fallback: if JSON parsing fails, return raw output (for compatibility)
+      debugLog('ClaudeAdapter.send', 'JSON parse failed, using raw output');
       return result.stdout.trim();
     }
   }

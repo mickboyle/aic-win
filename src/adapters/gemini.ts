@@ -1,14 +1,23 @@
 import { ToolAdapter, SendOptions } from './base.js';
-import { runCommand, commandExists, stripAnsi } from '../utils.js';
+import { runCommand, commandExists, stripAnsi, debugLog } from '../utils.js';
 
 /**
- * Adapter for Gemini CLI
- * 
- * Gemini CLI supports:
+ * Adapter for Google's Gemini CLI.
+ *
+ * This adapter provides integration with Google's Gemini CLI tool.
+ *
+ * Features:
  * - Non-interactive mode via positional query argument
  * - Output formats: text, json, stream-json (via -o/--output-format)
- * - Session resume via -r/--resume
+ * - Session resume via -r/--resume for conversation continuity
  * - YOLO mode via -y/--yolo for auto-approval
+ *
+ * Installation:
+ * ```bash
+ * npm install -g @google/gemini-cli
+ * ```
+ *
+ * @see https://github.com/google/gemini-cli
  */
 export class GeminiAdapter implements ToolAdapter {
   readonly name = 'gemini';
@@ -191,15 +200,53 @@ export class GeminiAdapter implements ToolAdapter {
     return output.trim();
   }
 
+  /**
+   * Send a prompt to Gemini CLI and get a response.
+   *
+   * Uses JSON output format for clean response extraction.
+   *
+   * @param prompt - The prompt to send
+   * @param options - Options including cwd, continueSession, timeout
+   * @returns Promise resolving to the response text
+   * @throws Error if Gemini CLI fails or returns an error
+   */
   async send(prompt: string, options?: SendOptions): Promise<string> {
+    debugLog('GeminiAdapter.send', 'Sending prompt', {
+      promptLength: prompt.length,
+      continueSession: options?.continueSession,
+    });
+
     // Use non-interactive runCommand to avoid messing with stdin
     const args = this.getCommand(prompt, options).slice(1); // Remove 'gemini' from start
 
-    const result = await runCommand('gemini', args, {
-      cwd: options?.cwd || process.cwd(),
-    });
+    debugLog('GeminiAdapter.send', 'Executing command', { argsCount: args.length });
+
+    let result;
+    try {
+      result = await runCommand('gemini', args, {
+        cwd: options?.cwd || process.cwd(),
+      });
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      debugLog('GeminiAdapter.send', 'Command execution failed', { error: errorMsg });
+
+      // Provide helpful error messages
+      if (errorMsg.includes('not found') || errorMsg.includes('ENOENT')) {
+        throw new Error(
+          'Gemini CLI is not installed or not in PATH.\n' +
+          'Install it with: npm install -g @google/gemini-cli\n' +
+          'Then run "gemini" once to complete authentication.'
+        );
+      }
+      throw error;
+    }
 
     if (result.exitCode !== 0) {
+      debugLog('GeminiAdapter.send', 'Non-zero exit code', {
+        exitCode: result.exitCode,
+        stderr: result.stderr.slice(0, 200),
+      });
+
       // Try to parse error from JSON response
       try {
         const errorJson = JSON.parse(result.stdout);
@@ -209,7 +256,17 @@ export class GeminiAdapter implements ToolAdapter {
       } catch {
         // Fall back to raw error message
       }
+
       const errorMsg = result.stderr.trim() || result.stdout.trim() || 'Unknown error';
+
+      // Provide specific guidance for common errors
+      if (errorMsg.includes('authentication') || errorMsg.includes('credentials')) {
+        throw new Error(
+          `Gemini CLI authentication error: ${errorMsg}\n` +
+          'Run "gemini" interactively to authenticate with your Google account.'
+        );
+      }
+
       throw new Error(`Gemini CLI exited with code ${result.exitCode}: ${errorMsg}`);
     }
 
@@ -219,9 +276,11 @@ export class GeminiAdapter implements ToolAdapter {
     // Parse JSON response and extract the response field
     try {
       const jsonResponse = JSON.parse(result.stdout);
+      debugLog('GeminiAdapter.send', 'Response received', { resultLength: (jsonResponse.response || '').length });
       return jsonResponse.response || '';
     } catch (parseError) {
       // Fallback: if JSON parsing fails, return raw output (for compatibility)
+      debugLog('GeminiAdapter.send', 'JSON parse failed, using raw output');
       return result.stdout.trim();
     }
   }

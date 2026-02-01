@@ -1,7 +1,7 @@
 import { createInterface, Interface, CompleterResult } from 'readline';
 import { marked } from 'marked';
 import TerminalRenderer from 'marked-terminal';
-import { stripAnsi, commandExists } from './utils.js';
+import { stripAnsi, commandExists, debugLog } from './utils.js';
 import { getDefaultTool, setDefaultTool, shouldCheckVersion, setVersionCache, getVersionCache } from './config.js';
 import { VERSION, PACKAGE_NAME, checkForUpdates } from './version.js';
 import { AdapterRegistry } from './adapters/base.js';
@@ -1437,24 +1437,57 @@ export class SDKSession {
     console.log('');
   }
 
+  /**
+   * Handle the /forward command to send the last AI response to another tool.
+   *
+   * @param argsString - Arguments string (optional tool name and additional message)
+   * @param interactive - If true, enter interactive mode after forwarding
+   */
   private async handleForward(argsString: string, interactive: boolean = false): Promise<void> {
+    debugLog('handleForward', 'Starting forward', { argsString, interactive });
+
+    // Validate conversation history exists
+    if (this.conversationHistory.length === 0) {
+      console.log(`${colors.yellow}No conversation history yet.${colors.reset} Start a conversation first, then use /forward.`);
+      return;
+    }
+
     // Find the last assistant response
     let lastResponseIndex = -1;
     for (let i = this.conversationHistory.length - 1; i >= 0; i--) {
-        if (this.conversationHistory[i].role === 'assistant') {
-            lastResponseIndex = i;
-            break;
-        }
+      if (this.conversationHistory[i].role === 'assistant') {
+        lastResponseIndex = i;
+        break;
+      }
     }
 
     if (lastResponseIndex === -1) {
-      console.log('No response to forward yet.');
+      console.log(`${colors.yellow}No AI response to forward yet.${colors.reset} Get a response first, then use /forward.`);
       return;
     }
-    
+
     const lastResponse = this.conversationHistory[lastResponseIndex];
-    // Attempt to find the preceding user message
-    const previousMessage = lastResponseIndex > 0 ? this.conversationHistory[lastResponseIndex - 1] : null;
+
+    // Validate the response has content
+    if (!lastResponse.content || lastResponse.content.trim().length === 0) {
+      console.log(`${colors.yellow}The last response is empty.${colors.reset} Nothing to forward.`);
+      return;
+    }
+
+    // Attempt to find the preceding user message - strict role check
+    let previousMessage = null;
+    if (lastResponseIndex > 0) {
+      const candidate = this.conversationHistory[lastResponseIndex - 1];
+      // Only include if it's strictly a user message from the same tool
+      if (candidate.role === 'user' && candidate.tool === lastResponse.tool) {
+        previousMessage = candidate;
+      }
+    }
+
+    debugLog('handleForward', 'Found response to forward', {
+      responseLength: lastResponse.content.length,
+      hasPreviousUserMessage: !!previousMessage,
+    });
 
     const sourceTool = lastResponse.tool;
     const otherTools = AVAILABLE_TOOLS

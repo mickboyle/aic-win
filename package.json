@@ -33,15 +33,15 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/mickboyle/ai-code-connect.git"
+    "url": "git+https://github.com/mickboyle/aic-win.git"
   },
   "publishConfig": {
     "access": "public"
   },
   "bugs": {
-    "url": "https://github.com/jacob-bd/ai-code-connect/issues"
+    "url": "https://github.com/mickboyle/aic-win/issues"
   },
-  "homepage": "https://github.com/jacob-bd/ai-code-connect#readme",
+  "homepage": "https://github.com/mickboyle/aic-win#readme",
   "engines": {
     "node": ">=20.0.0"
   },

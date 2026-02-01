@@ -84,7 +84,11 @@ export class ClaudeAdapter implements ToolAdapter {
     }
 
     // Use session args to isolate and continue aic's sessions
-    if (options?.continueSession !== false) {
+    if (options?.continueSession === false) {
+      // Fresh session requested - use a new unique session ID to prevent
+      // Claude from resuming any previous session context
+      args.push('--session-id', randomUUID());
+    } else {
       args.push(...this.getSessionArgs());
     }
 
@@ -99,7 +103,10 @@ export class ClaudeAdapter implements ToolAdapter {
   getInteractiveCommand(options?: SendOptions): string[] {
     const args: string[] = [];
     // Use session args to maintain isolated session
-    if (options?.continueSession !== false) {
+    if (options?.continueSession === false) {
+      // Fresh session requested - use a new unique session ID
+      args.push('--session-id', randomUUID());
+    } else {
       args.push(...this.getSessionArgs());
     }
     return ['claude', ...args];

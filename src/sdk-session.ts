@@ -947,7 +947,7 @@ export class SDKSession {
     }
   }
 
-  private async sendToTool(message: string): Promise<void> {
+  private async sendToTool(message: string, continueSession: boolean = true): Promise<void> {
     // Prevent concurrent requests
     if (this.requestInProgress) {
       console.log(`${colors.yellow}⏳ Please wait for the current request to finish${colors.reset}`);
@@ -993,7 +993,7 @@ export class SDKSession {
 
       const response = await adapter.send(message, {
         cwd: this.cwd,
-        continueSession: true,
+        continueSession: continueSession,
         timeout: REQUEST_TIMEOUT_MS,
       });
 
@@ -1507,7 +1507,7 @@ export class SDKSession {
       // This ensures the user sees the AI's response to the forwarded message
       // before entering interactive mode.
       console.log(`${targetColor}${targetDisplayName} responds:${colors.reset}`);
-      await this.sendToTool(forwardPrompt);
+      await this.sendToTool(forwardPrompt, false);
 
       // Now enter interactive mode for follow-up
       console.log(`\n${colors.dim}Entering interactive mode for follow-up...${colors.reset}`);
@@ -1515,7 +1515,7 @@ export class SDKSession {
     } else {
       // Regular /fwd: show spinner and display response
       console.log(`${targetColor}${targetDisplayName} responds:${colors.reset}`);
-      await this.sendToTool(forwardPrompt);
+      await this.sendToTool(forwardPrompt, false);
     }
   }
 

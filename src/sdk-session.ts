@@ -1502,15 +1502,16 @@ export class SDKSession {
     }
 
     if (interactive) {
-      // Silent send: show status spinner, don't display response
-      // User will see the response when interactive mode opens
-      const statusMessage = `Sending to ${targetDisplayName}... Interactive mode will launch shortly`;
-      const success = await this.sendToToolSilent(forwardPrompt, statusMessage);
+      // For interactive forward: first send via print mode and SHOW the response,
+      // then enter interactive mode for follow-up conversation.
+      // This ensures the user sees the AI's response to the forwarded message
+      // before entering interactive mode.
+      console.log(`${targetColor}${targetDisplayName} responds:${colors.reset}`);
+      await this.sendToTool(forwardPrompt);
 
-      if (success) {
-        console.log(`\n${colors.dim}Launching interactive mode...${colors.reset}`);
-        await this.enterInteractiveMode();
-      }
+      // Now enter interactive mode for follow-up
+      console.log(`\n${colors.dim}Entering interactive mode for follow-up...${colors.reset}`);
+      await this.enterInteractiveMode();
     } else {
       // Regular /fwd: show spinner and display response
       console.log(`${targetColor}${targetDisplayName} responds:${colors.reset}`);

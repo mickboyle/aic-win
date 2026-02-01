@@ -13,15 +13,22 @@ export interface RunResult {
 export async function runCommand(
   command: string,
   args: string[],
-  options: SpawnOptions = {}
+  options: SpawnOptions = {},
+  input?: string
 ): Promise<RunResult> {
   return new Promise((resolve, reject) => {
+    const hasInput = input !== undefined;
     const proc = spawn(command, args, {
       ...options,
-      stdio: ['ignore', 'pipe', 'pipe'], // ignore stdin - we're not sending input
+      stdio: [hasInput ? 'pipe' : 'ignore', 'pipe', 'pipe'], 
       // On Windows, npm global packages are .cmd files which require shell execution
       shell: process.platform === 'win32',
     });
+    
+    if (hasInput && proc.stdin) {
+      proc.stdin.write(input);
+      proc.stdin.end();
+    }
     
     let stdout = '';
     let stderr = '';

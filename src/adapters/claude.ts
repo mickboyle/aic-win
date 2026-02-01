@@ -233,11 +233,27 @@ export class ClaudeAdapter implements ToolAdapter {
 
   async send(prompt: string, options?: SendOptions): Promise<string> {
     // For print mode (-p), use non-interactive runCommand to avoid messing with stdin
-    const args = this.getCommand(prompt, options).slice(1); // Remove 'claude' from start
+    const allArgs = this.getCommand(prompt, options).slice(1); // Remove 'claude' from start
+
+    // Separating prompt from arguments to pass via stdin
+    // getCommand adds the prompt as the last argument for non-slash commands
+    const isSlashCommand = prompt.startsWith('/');
+    
+    let args = allArgs;
+    let input: string | undefined = undefined;
+
+    if (!isSlashCommand) {
+      // The last argument should be the prompt
+      // We remove it from args and pass it as input
+      if (args.length > 0 && args[args.length - 1] === prompt) {
+        args = args.slice(0, -1);
+        input = prompt;
+      }
+    }
 
     const result = await runCommand('claude', args, {
       cwd: options?.cwd || process.cwd(),
-    });
+    }, input);
 
     if (result.exitCode !== 0) {
       // Try to parse error from JSON response

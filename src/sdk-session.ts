@@ -1439,14 +1439,22 @@ export class SDKSession {
 
   private async handleForward(argsString: string, interactive: boolean = false): Promise<void> {
     // Find the last assistant response
-    const lastResponse = [...this.conversationHistory]
-      .reverse()
-      .find(m => m.role === 'assistant');
+    let lastResponseIndex = -1;
+    for (let i = this.conversationHistory.length - 1; i >= 0; i--) {
+        if (this.conversationHistory[i].role === 'assistant') {
+            lastResponseIndex = i;
+            break;
+        }
+    }
 
-    if (!lastResponse) {
+    if (lastResponseIndex === -1) {
       console.log('No response to forward yet.');
       return;
     }
+    
+    const lastResponse = this.conversationHistory[lastResponseIndex];
+    // Attempt to find the preceding user message
+    const previousMessage = lastResponseIndex > 0 ? this.conversationHistory[lastResponseIndex - 1] : null;
 
     const sourceTool = lastResponse.tool;
     const otherTools = AVAILABLE_TOOLS
@@ -1495,7 +1503,14 @@ export class SDKSession {
     console.log(`${colors.dim}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}`);
 
     // Build forward prompt
-    let forwardPrompt = `[FORWARDED FROM ${sourceDisplayName.toUpperCase()}]\n\n${lastResponse.content}\n\n[END FORWARDED MESSAGE]`;
+    let forwardPrompt = `[FORWARDED INTERACTION WITH ${sourceDisplayName.toUpperCase()}]\n\n`;
+    
+    // Include user prompt if available
+    if (previousMessage && previousMessage.role === 'user') {
+        forwardPrompt += `USER PROMPT:\n${previousMessage.content}\n\n`;
+    }
+    
+    forwardPrompt += `AI RESPONSE:\n${lastResponse.content}\n\n[END FORWARDED MESSAGE]`;
 
     if (additionalMessage.trim()) {
       forwardPrompt += `\n\nInstruction: ${additionalMessage.trim()}`;

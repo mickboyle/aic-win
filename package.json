@@ -1,7 +1,7 @@
 {
-  "name": "ai-code-connect",
-  "version": "0.3.2",
-  "description": "AI Code Connect - Bridge Claude Code and Gemini CLI",
+  "name": "@mickboyle/aic-win",
+  "version": "0.3.3-win.1",
+  "description": "Windows-optimized bridge for Claude Code and Gemini CLI - Fork of ai-code-connect",
   "main": "dist/index.js",
   "bin": {
     "aic": "./dist/index.js"
@@ -25,21 +25,25 @@
     "claude-code",
     "gemini-cli",
     "bridge",
-    "assistant"
+    "assistant",
+    "windows"
   ],
-  "author": "Jacob Ben-Davi",
+  "author": "Jacob Ben-Davi (Windows fixes by Mick Boyle)",
   "license": "MIT",
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/jacob-bd/ai-code-connect.git"
+    "url": "git+https://github.com/mickboyle/ai-code-connect.git"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "bugs": {
     "url": "https://github.com/jacob-bd/ai-code-connect/issues"
   },
   "homepage": "https://github.com/jacob-bd/ai-code-connect#readme",
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   },
   "dependencies": {
     "@xterm/addon-serialize": "^0.13.0",

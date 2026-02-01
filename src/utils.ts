@@ -19,6 +19,8 @@ export async function runCommand(
     const proc = spawn(command, args, {
       ...options,
       stdio: ['ignore', 'pipe', 'pipe'], // ignore stdin - we're not sending input
+      // On Windows, npm global packages are .cmd files which require shell execution
+      shell: process.platform === 'win32',
     });
     
     let stdout = '';

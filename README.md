@@ -1,6 +1,6 @@
 # AIC-Win: Windows-Optimized AI CLI Bridge
 
-[![npm version](https://img.shields.io/npm/v/@mickboyle/aic-win.svg)](https://www.npmjs.com/package/@mickboyle/aic-win)
+[![npm version](https://img.shields.io/npm/v/@mcboyle/aic-win.svg)](https://www.npmjs.com/package/@mcboyle/aic-win)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Windows](https://img.shields.io/badge/OS-Windows-blue)](https://www.microsoft.com/windows)
 
@@ -26,7 +26,7 @@ This fork is specifically optimized for **Windows** environments, fixing common 
 
 ### Install via NPM
 ```bash
-npm install -g @mickboyle/aic-win
+npm install -g @mcboyle/aic-win
 ```
 
 ### Install from Source

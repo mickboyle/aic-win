@@ -1495,10 +1495,10 @@ export class SDKSession {
     console.log(`${colors.dim}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}`);
 
     // Build forward prompt
-    let forwardPrompt = `Another AI assistant (${sourceDisplayName}) provided this response. Please review and share your thoughts:\n\n---\n${lastResponse.content}\n---`;
+    let forwardPrompt = `[FORWARDED FROM ${sourceDisplayName.toUpperCase()}]\n\n${lastResponse.content}\n\n[END FORWARDED MESSAGE]`;
 
     if (additionalMessage.trim()) {
-      forwardPrompt += `\n\nAdditional context: ${additionalMessage.trim()}`;
+      forwardPrompt += `\n\nInstruction: ${additionalMessage.trim()}`;
     }
 
     if (interactive) {
